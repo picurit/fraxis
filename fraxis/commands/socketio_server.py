@@ -5,10 +5,159 @@ from frappe.utils import get_site_name, now as frappe_now
 import asyncio
 import uvicorn
 import uvloop
-import socketio
+from socketio.exceptions import ConnectionRefusedError
+from socketio import AsyncNamespace, AsyncServer, ASGIApp
 from typing import Dict, Callable, Any, List
+from json import dumps, loads
+
+# TODO: remove this import, only for type hinting
+import werkzeug.wrappers
 
 from fraxis.utils.cornerstone.response import Response
+from fraxis.utils.types import DotDict
+
+class SocketIONamespace(AsyncNamespace):
+    """Base namespace with common functionality"""
+    
+    def validate_auth(self, client_auth) -> bool:
+        """Validate client authentication"""
+        print(f"Validating client auth, client_auth: {client_auth}")
+        # TODO: Implement authentication logic here
+        return True
+    
+    async def on_connect(self, sid, environ, client_auth):
+        """Handle client connection"""
+        print(f"Client connected, sid: {sid}, environ: {environ}, client_auth: {client_auth}")
+        await self.emit('connect:admit', to=sid)
+        if not self.validate_auth(client_auth):
+            await self.emit('connect:failure', to=sid)
+            raise ConnectionRefusedError("Authentication failed")
+        else:
+            await self.emit('connect:success', to=sid)
+        await self.emit('connect:ready', to=sid)
+    
+    async def on_disconnect(self, sid, reason):
+        """Handle client disconnection"""
+        print(f"Client disconnected, sid: {sid}, reason: {reason}")
+    
+    async def on_message(self, sid, data):
+        """Handle generic message from client"""
+        print(f"Message received, sid: {sid}, data: {data}")
+
+class SystemNamespace(SocketIONamespace):
+    """Handle system-level events"""
+    
+    async def on_ping(self, sid, data: Dict = {}) -> Response:
+        """Handle ping event from client"""        
+        print(f"Ping received, sid: {sid}, data: {data}")
+        await self.emit('ping:admit', to=sid)
+        
+        data_response = DotDict(data)
+        data_response.message = 'pong'
+        
+        metadata = DotDict()
+        metadata.timestamp = frappe_now()
+        metadata.sid = sid
+        metadata.site = get_site_name(frappe.local.site)
+
+        response = Response.success(
+            data=data_response.as_dict(),
+            metadata=metadata.as_dict(),
+        )
+
+        response_dict = response.to_dict()
+        if response.is_success:
+            await self.emit('ping:success', response_dict, to=sid)
+        else:
+            await self.emit('ping:failure', response_dict, to=sid)
+        
+        await self.emit('ping:end', to=sid)
+        
+        return response_dict
+    
+    async def on_health(self, sid, data: Dict = {}) -> Response:
+        """Handle health check event from client"""
+        print(f"Health check received, sid: {sid}, data: {data}")
+
+        data_response = DotDict()
+        data_response.status = 'healthy'
+
+        metadata = DotDict()
+        metadata.timestamp = frappe_now()
+        metadata.sid = sid
+        metadata.site = get_site_name(frappe.local.site)
+
+        response = Response.success(
+            data=data_response.as_dict(),
+            metadata=metadata.as_dict(),
+        ).to_dict()
+
+        await self.emit('health_response', response, to=sid)
+        
+        return response
+    
+class APINamespace(SocketIONamespace):
+    """Handle frappe API related events"""
+    
+    async def on_method(self, sid, data) -> Response:
+        """Handle method call from client"""
+        print(f"Method call received, sid: {sid}, data: {data}")
+        await self.emit('method:admit', to=sid)
+        
+        """
+        data expected format:
+        {
+            "method": "frappe.client.get_list",
+            "args": {...}
+        }
+        """
+        
+        #call frappe method here and get result
+        method = data.get('method')
+        args = data.get('args', {})
+        # agentbuilder.api.dialogueresponse() argument after ** must be a mapping, not str
+        if not isinstance(args, Dict):
+            args = loads(args)
+        
+        current_user = frappe.session.user
+        try:
+            # TODO: make better method resolution
+            frappe.set_user("Administrator")
+            method_func = frappe.get_attr(method)
+            if asyncio.iscoroutinefunction(method_func):
+                result: werkzeug.wrappers.Response = await method_func(**args)
+            else:
+                result: werkzeug.wrappers.Response = method_func(**args)
+            
+            data_response = loads(result.get_data(as_text=True))
+            
+            response = Response.success(
+                data=data_response,
+                metadata={
+                    'timestamp': frappe_now(),
+                    'sid': sid,
+                    'site': get_site_name(frappe.local.site)
+                }
+            )
+
+            frappe.db.commit()
+            await self.emit('method:success', response.to_dict(), to=sid)
+        except Exception as e:
+            response = Response.failure(
+                error=str(e),
+                metadata={
+                    'timestamp': frappe_now(),
+                    'sid': sid,
+                    'site': get_site_name(frappe.local.site)
+                }
+            )
+            await self.emit('method:failure', response.to_dict(), to=sid)
+
+        finally:
+            frappe.set_user(current_user)
+            await self.emit('method:end', to=sid)
+        
+        return response.to_dict()
 
 class SocketIOServer:
     """Class to manage the Socket.IO server"""
@@ -19,81 +168,20 @@ class SocketIOServer:
         self.logging = logging
         
         # Initialize ASGI Socket.IO server
-        self.sio = socketio.AsyncServer(
+        self.sio = AsyncServer(
             async_mode='asgi', 
             cors_allowed_origins='*',
             async_handlers=True,
         )
-        self.app = socketio.ASGIApp(self.sio)
+        self.app = ASGIApp(self.sio)
         
-        #Register events
-        self._event_handlers: Dict[str, Callable] = {}
-        self._mapping_event_handlers()
-        self._bind_event_to_socketio()
+        self._register_namespaces()
     
-    def _mapping_event_handlers(self):
-        """Map event names to handler methods"""
-        self._event_handlers = {
-            'connect': self._handle_connect,
-            'disconnect': self._handle_disconnect,
-            'message': self._handle_message,
-            'ping': self._handle_ping,
-        }
+    def _register_namespaces(self):
+        """Register namespaces and their handlers"""
+        self.sio.register_namespace(SystemNamespace('/system'))
+        self.sio.register_namespace(APINamespace('/api'))
     
-    def _bind_event_to_socketio(self):
-        """Bind event handlers to Socket.IO events"""
-        for event_name, handler in self._event_handlers.items():
-            self.sio.on(event=event_name, handler=handler)
-    
-    # Event Handlers
-    
-    async def _handle_connect(self, sid, environ, client_auth):
-        """Handle client connection"""
-        print(f"Client connected -> sid: {sid}, environ: {environ}, client_auth: {client_auth}")
-        
-        data = {
-            'timestamp': frappe_now(),
-            'sid': sid,
-            'site': get_site_name(frappe.local.site),
-        }
-        
-        response = {
-            'success': True,
-            'message': 'Connected to frappe SocketIO server',
-            'data': data,
-        }
-        
-        await self.sio.emit('connected', response, to=sid)
-    
-    async def _handle_disconnect(self, sid, reason):
-        """Handle client disconnection"""
-        print(f"Client disconnected -> sid: {sid}, reason: {reason}")
-    
-    async def _handle_message(self, sid, data):
-        """Handle generic message from client"""
-        print(f"Message received from {sid}: {data}")
-    
-    async def _handle_ping(self, sid, data: Dict = {}):
-        """Handle ping event from client"""        
-        print(f"Ping received from {sid}: {data}")
-        
-        data_response = frappe._dict(data)
-        data_response.message = 'pong'
-        
-        metadata = frappe._dict()
-        metadata.timestamp = frappe_now()
-        metadata.sid = sid
-        metadata.site = get_site_name(frappe.local.site)
-
-        response = Response.success(
-            data=dict(data_response),
-            metadata=dict(metadata),
-        ).to_dict()
-
-        await self.sio.emit('pong', response, to=sid)
-        
-        return response # Callback args
-
     async def doc_create(self, sid, data):
         """Create a new document in any DocType"""
         try:
