@@ -1,5 +1,4 @@
-from json import dumps
-from frappe import _dict
+from frappe import _dict, as_json
 
 class DotDict(_dict):
     """Dictionary that supports dot notation access to attributes"""
@@ -10,4 +9,4 @@ class DotDict(_dict):
     
     def to_json(self) -> str:
         """Convert DotDict to a JSON string"""
-        return dumps(self)
+        return as_json(self)
