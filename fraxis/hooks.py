@@ -1,9 +1,14 @@
+# Copyright (c) 2026, Picurit and contributors
+# This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0.
+# If a copy of the MPL was not distributed with this file, You can obtain one at http://mozilla.org/MPL/2.0/.
+# For license information, please see license.txt
+
 app_name = "fraxis"
 app_title = "Fraxis Socket IO"
 app_publisher = "Picurit"
 app_description = "Bidirectional axis for full CRUD Frappe-Database operations trough Socket IO"
 app_email = "dev@picurit.com"
-app_license = "agpl-3.0"
+app_license = "mpl-2.0"
 
 # Apps
 # ------------------
