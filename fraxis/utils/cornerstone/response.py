@@ -100,10 +100,12 @@ class Response(BaseModel, Generic[T]):
         return cls(is_success=True, data=data, metadata=metadata)
 
     @classmethod
-    def failure(cls, error_message: str, error_code: str = None, details: Optional[Dict[str, Any]] = None, stack_trace: Optional[str] = None) -> 'Response[T]':
+    def failure(cls, error: str = None, error_code: str = None, details: Optional[Dict[str, Any]] = None, stack_trace: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> 'Response[T]':
         """Create a failed response"""
-        response = cls(is_success=False)
-        return response.add_error(error_message, error_code, details, stack_trace)
+        response = cls(is_success=False, metadata=metadata)
+        if error:
+            return response.add_error(error, error_code, details, stack_trace)
+        return response
     
     @property
     def has_errors(self) -> bool:

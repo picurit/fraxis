@@ -20,4 +20,15 @@ build-backend = "flit_core.buildapi"
 
 # These dependencies are only installed when developer mode is enabled
 [tool.bench.dev-dependencies]
-# package_name = "~=1.1.0"
+pytest = ">=7.4.0"
+pytest-asyncio = ">=0.21.0"
+pytest-cov = ">=4.1.0"
+pytest-xdist = ">=3.3.1"
+pytest-timeout = ">=2.1.0"
+pytest-mock = ">=3.11.1"
+locust = ">=2.20.0"
+coverage = ">=7.0.0"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["fraxis/tests"]
