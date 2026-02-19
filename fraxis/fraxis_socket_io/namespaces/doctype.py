@@ -42,7 +42,7 @@ class DoctypeNamespace(FraxisNamespace):
     _handler_map: ClassVar[dict[str, str]] = {}
 
     @FraxisNamespace.handler('doctype:list')
-    async def on_doctype_list(self, sid, data: dict) -> dict:
+    async def on_doctype_list(self, sid, data: dict = None) -> dict:
         """
         Query a paginated list of documents.
         data: { doctype, filters?, fields?, limit?, limit_start?, order_by? }
@@ -52,6 +52,10 @@ class DoctypeNamespace(FraxisNamespace):
         """
         metadata = _get_metadata(sid)
         
+        # Ensure data is a dict, not None
+        if data is None:
+            data = {}
+
         try:
             doctype = data.get('doctype')
             filters = data.get('filters', None)
@@ -75,8 +79,7 @@ class DoctypeNamespace(FraxisNamespace):
                 'filters': filters,
                 'fields': fields,
                 'limit_page_length': limit,
-                'limit_page_length_count': limit,
-                'offset': limit_start,
+                'limit_start': limit_start,
             }
             
             if order_by:
@@ -111,7 +114,7 @@ class DoctypeNamespace(FraxisNamespace):
             return response.to_dict()
 
     @FraxisNamespace.handler('doctype:count')
-    async def on_doctype_count(self, sid, data: dict) -> dict:
+    async def on_doctype_count(self, sid, data: dict = None) -> dict:
         """
         Count documents matching filters.
         data: { doctype, filters? }
@@ -121,6 +124,10 @@ class DoctypeNamespace(FraxisNamespace):
         """
         metadata = _get_metadata(sid)
         
+        # Ensure data is a dict, not None
+        if data is None:
+            data = {}
+
         try:
             doctype = data.get('doctype')
             filters = data.get('filters', None)
@@ -164,7 +171,7 @@ class DoctypeNamespace(FraxisNamespace):
             return response.to_dict()
 
     @FraxisNamespace.handler('doctype:meta')
-    async def on_doctype_meta(self, sid, data: dict) -> dict:
+    async def on_doctype_meta(self, sid, data: dict = None) -> dict:
         """
         Retrieve DocType metadata (field definitions, permissions, etc).
         data: { doctype }
@@ -174,6 +181,10 @@ class DoctypeNamespace(FraxisNamespace):
         """
         metadata = _get_metadata(sid)
         
+        # Ensure data is a dict, not None
+        if data is None:
+            data = {}
+
         try:
             doctype = data.get('doctype')
             
@@ -217,7 +228,7 @@ class DoctypeNamespace(FraxisNamespace):
             return response.to_dict()
 
     @FraxisNamespace.handler('doctype:subscribe')
-    async def on_doctype_subscribe(self, sid, data: dict) -> dict:
+    async def on_doctype_subscribe(self, sid, data: dict = None) -> dict:
         """
         Subscribe to new-document notifications for a specific DocType.
         data: { doctype }
@@ -225,6 +236,10 @@ class DoctypeNamespace(FraxisNamespace):
         """
         metadata = _get_metadata(sid)
         
+        # Ensure data is a dict, not None
+        if data is None:
+            data = {}
+
         try:
             doctype = data.get('doctype')
             
@@ -258,7 +273,7 @@ class DoctypeNamespace(FraxisNamespace):
             return response.to_dict()
 
     @FraxisNamespace.handler('doctype:unsubscribe')
-    async def on_doctype_unsubscribe(self, sid, data: dict) -> dict:
+    async def on_doctype_unsubscribe(self, sid, data: dict = None) -> dict:
         """
         Unsubscribe from new-document notifications for a specific DocType.
         data: { doctype }
@@ -266,6 +281,10 @@ class DoctypeNamespace(FraxisNamespace):
         """
         metadata = _get_metadata(sid)
         
+        # Ensure data is a dict, not None
+        if data is None:
+            data = {}
+
         try:
             doctype = data.get('doctype')
             

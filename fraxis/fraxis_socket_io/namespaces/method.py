@@ -61,13 +61,16 @@ class MethodNamespace(FraxisNamespace):
             method = frappe.get_attr(method_name)
         
         # Validate method is whitelisted
-        if not frappe.is_whitelisted(method):
+        # Note: frappe.is_whitelisted() raises PermissionError if not whitelisted
+        try:
+            frappe.is_whitelisted(method)
+        except frappe.PermissionError:
             raise frappe.PermissionError(f"Method {method_name} is not whitelisted")
         
         return method
 
     @FraxisNamespace.handler('method:execute')
-    async def on_method_execute(self, sid, data: dict) -> dict:
+    async def on_method_execute(self, sid, data: dict = None) -> dict:
         """
         Execute a whitelisted method synchronously.
         data: { method: str, args?: dict }
@@ -77,6 +80,10 @@ class MethodNamespace(FraxisNamespace):
         """
         metadata = _get_metadata(sid)
         
+        # Ensure data is a dict, not None
+        if data is None:
+            data = {}
+
         try:
             method_name = data.get('method')
             args = data.get('args', {})
@@ -132,7 +139,7 @@ class MethodNamespace(FraxisNamespace):
             return response.to_dict()
 
     @FraxisNamespace.handler('method:enqueue')
-    async def on_method_enqueue(self, sid, data: dict) -> dict:
+    async def on_method_enqueue(self, sid, data: dict = None) -> dict:
         """
         Enqueue a whitelisted method as a background job.
         data: { method: str, args?: dict }
@@ -144,6 +151,10 @@ class MethodNamespace(FraxisNamespace):
         """
         metadata = _get_metadata(sid)
         
+        # Ensure data is a dict, not None
+        if data is None:
+            data = {}
+
         try:
             method_name = data.get('method')
             args = data.get('args', {})
@@ -208,7 +219,7 @@ class MethodNamespace(FraxisNamespace):
             return response.to_dict()
 
     @FraxisNamespace.handler('method:subscribe')
-    async def on_method_subscribe(self, sid, data: dict) -> dict:
+    async def on_method_subscribe(self, sid, data: dict = None) -> dict:
         """
         Subscribe to all lifecycle events for a specific whitelisted method.
         data: { method: str }
@@ -218,6 +229,10 @@ class MethodNamespace(FraxisNamespace):
         """
         metadata = _get_metadata(sid)
         
+        # Ensure data is a dict, not None
+        if data is None:
+            data = {}
+
         try:
             method_name = data.get('method')
             
@@ -250,7 +265,7 @@ class MethodNamespace(FraxisNamespace):
             return response.to_dict()
 
     @FraxisNamespace.handler('method:unsubscribe')
-    async def on_method_unsubscribe(self, sid, data: dict) -> dict:
+    async def on_method_unsubscribe(self, sid, data: dict = None) -> dict:
         """
         Unsubscribe from lifecycle events for a specific method.
         data: { method: str }
@@ -259,6 +274,10 @@ class MethodNamespace(FraxisNamespace):
         """
         metadata = _get_metadata(sid)
         
+        # Ensure data is a dict, not None
+        if data is None:
+            data = {}
+
         try:
             method_name = data.get('method')
             
