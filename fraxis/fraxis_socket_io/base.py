@@ -40,18 +40,35 @@ class FraxisNamespace(AsyncNamespace):
         avoid cross-contamination between namespaces.
         """
         def decorator(fn: Callable) -> Callable:
-            cls._handler_map[event] = fn.__name__
+            # Mark the function with the event it handles
+            # This allows trigger_event to discover handlers dynamically
+            fn.__fraxis_handler_event__ = event
+            
+            # Also try to register in the _handler_map if it exists and is mutable
+            if hasattr(cls, '_handler_map') and isinstance(cls._handler_map, dict):
+                cls._handler_map[event] = fn.__name__
+            
             return fn
         return decorator
 
     async def trigger_event(self, event: str, *args) -> Any:
         """
         Override of AsyncNamespace.trigger_event.
-        Checks _handler_map first, then falls back to default on_<event> resolution.
+        Checks _handler_map first, then searches for methods marked with @handler decorator,
+        then falls back to default on_<event> resolution.
         This allows event names with colons to be properly dispatched.
+        
+        Handlers are expected to have signature: async def handler(self, sid, data=None)
+        If Socket.IO passes incomplete args, we provide defaults.
         """
+        # Ensure args has at least (sid, data) - if data is missing, provide empty dict
+        if len(args) < 2:
+            # args should be (sid, data) for most handlers
+            # If only sid is provided, add empty dict as data
+            args = args + ({},) if len(args) == 1 else args
+        
         # Check if event is in the handler map (for colon-separated events)
-        method_name = self._handler_map.get(event)
+        method_name = self._handler_map.get(event) if hasattr(self, '_handler_map') else None
         
         if method_name:
             method = getattr(self, method_name, None)
@@ -64,6 +81,20 @@ class FraxisNamespace(AsyncNamespace):
                 else:
                     ret = method(*args)
                 return ret
+        
+        # Dynamic search: look for methods marked with @handler decorator
+        for attr_name in dir(self):
+            attr = getattr(self, attr_name, None)
+            if callable(attr) and hasattr(attr, '__fraxis_handler_event__'):
+                if getattr(attr, '__fraxis_handler_event__') == event:
+                    if asyncio.iscoroutinefunction(attr):
+                        try:
+                            ret = await attr(*args)
+                        except asyncio.CancelledError:
+                            ret = None
+                    else:
+                        ret = attr(*args)
+                    return ret
         
         # Fallback to default on_<event> resolution
         return await super().trigger_event(event, *args)
