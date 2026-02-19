@@ -3,46 +3,81 @@
 # If a copy of the MPL was not distributed with this file, You can obtain one at http://mozilla.org/MPL/2.0/.
 # For license information, please see license.txt
 
-from abc import ABC, abstractmethod
-from typing import Generic, TypeVar, List, Optional, Any, Dict
-from pydantic import BaseModel, Field
-from enum import Enum
+"""
+Response Envelope Module
 
-T = TypeVar('T')
+Provides a lightweight, Pydantic-free response envelope for Fraxis Socket.IO operations.
+Replaces Pydantic with plain Python dataclasses for simplicity and Socket.IO compatibility.
+"""
+
+from dataclasses import dataclass, field, asdict
+from typing import List, Optional, Any, Dict
+from enum import Enum
+from datetime import datetime, date, time
+import json
+
 
 class TraceSeverityLevel(Enum):
+    """Severity levels for messages in response stacks."""
     INFO = "info"
     WARNING = "warning"
     ERROR = "error"
 
-class MessageTrace(BaseModel):
-    code: Optional[str] = None
+
+@dataclass
+class MessageTrace:
+    """Represents a single message (error, warning, or info) in a response."""
     message: str
     severity: TraceSeverityLevel
+    code: Optional[str] = None
     details: Optional[Dict[str, Any]] = None
     stack_trace: Optional[str] = None
-
-class Response(BaseModel, Generic[T]):
-    """Generic response model for standardized data and messages exchange."""
-    is_success: bool = Field(default=None, description="Indicates if the operation was successful")
-    error_stack: List[MessageTrace] = Field(default_factory=list, description="Error messages listed in case of failure")
-    info_stack: List[MessageTrace] = Field(default_factory=list, description="Informational messages listed to provide context")
-    warning_stack: List[MessageTrace] = Field(default_factory=list, description="Warning messages listed to highlight potential issues")
-    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Additional metadata related to the response")
-    data: Optional[T] = Field(default=None, description="Main payload if available")
     
-    class ConfigDict:
-        arbitrary_types_allowed = True
-        use_enum_values = True
-    
-    def __init__(self, **kargs: Any):
-        super().__init__(**kargs)
-        # Auto-calculate is_success based on error_stack
-        if not hasattr(self, 'is_success') or self.is_success is None:
-            self.is_success = len(self.error_stack) == 0
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert message trace to dictionary."""
+        return {
+            'code': self.code,
+            'message': self.message,
+            'severity': self.severity.value,  # Convert enum to string
+            'details': self.details,
+            'stack_trace': self.stack_trace
+        }
 
-    def add_error(self, message: str, code: str = None, details: Optional[Dict[str, Any]] = None, stack_trace: Optional[str] = None) -> 'Response[T]':
-        """Add an error message to the response"""
+
+@dataclass
+class Response:
+    """
+    Generic response envelope for standardized data and message exchange.
+    
+    No Pydantic dependency - uses plain Python dataclasses for:
+    - Simplicity
+    - Socket.IO compatibility
+    - Easy serialization
+    - No version conflicts
+    """
+    
+    data: Optional[Any] = None
+    metadata: Optional[Dict[str, Any]] = None
+    is_success: bool = True
+    error_stack: List[MessageTrace] = field(default_factory=list)
+    warning_stack: List[MessageTrace] = field(default_factory=list)
+    info_stack: List[MessageTrace] = field(default_factory=list)
+    
+    def __post_init__(self):
+        """Auto-calculate is_success based on error_stack."""
+        if self.error_stack:
+            self.is_success = False
+        else:
+            self.is_success = True
+    
+    def add_error(
+        self,
+        message: str,
+        code: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+        stack_trace: Optional[str] = None
+    ) -> 'Response':
+        """Add an error message to the response."""
         error_msg = MessageTrace(
             code=code,
             message=message,
@@ -54,8 +89,13 @@ class Response(BaseModel, Generic[T]):
         self.is_success = False
         return self
     
-    def add_warning(self, message: str, code: str = None, details: Optional[Dict[str, Any]] = None) -> 'Response[T]':
-        """Add a warning message to the response"""
+    def add_warning(
+        self,
+        message: str,
+        code: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None
+    ) -> 'Response':
+        """Add a warning message to the response."""
         warning_msg = MessageTrace(
             code=code,
             message=message,
@@ -64,9 +104,14 @@ class Response(BaseModel, Generic[T]):
         )
         self.warning_stack.append(warning_msg)
         return self
-
-    def add_info(self, message: str, code: str = None, details: Optional[Dict[str, Any]] = None) -> 'Response[T]':
-        """Add an informational message to the response"""
+    
+    def add_info(
+        self,
+        message: str,
+        code: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None
+    ) -> 'Response':
+        """Add an informational message to the response."""
         info_msg = MessageTrace(
             code=code,
             message=message,
@@ -76,118 +121,178 @@ class Response(BaseModel, Generic[T]):
         self.info_stack.append(info_msg)
         return self
     
-    def set_data(self, data: T) -> 'Response[T]':
-        """Set the response data"""
+    def set_data(self, data: Any) -> 'Response':
+        """Set the response data."""
         self.data = data
         return self
-
+    
     def get_all_messages(self) -> List[MessageTrace]:
-        """Get all messages sorted by severity"""
+        """Get all messages sorted by severity."""
         all_messages = self.error_stack + self.warning_stack + self.info_stack
-        return sorted(all_messages, key=lambda x: x.severity.value, reverse=True)
+        
+        # Sort by severity: ERROR > WARNING > INFO
+        severity_order = {
+            TraceSeverityLevel.ERROR: 3,
+            TraceSeverityLevel.WARNING: 2,
+            TraceSeverityLevel.INFO: 1
+        }
+        
+        return sorted(
+            all_messages,
+            key=lambda x: severity_order.get(x.severity, 0),
+            reverse=True
+        )
     
-    def to_dict(self, *args, **kwargs) -> Dict[str, Any]:
-        """Convert response to dictionary, refers to pydantic's model_dump and check docs for args/kwargs"""
-        return self.model_dump(*args, **kwargs)
+    def _make_serializable(self, obj: Any) -> Any:
+        """Recursively convert non-serializable objects to JSON-compatible types."""
+        if isinstance(obj, dict):
+            return {k: self._make_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._make_serializable(item) for item in obj]
+        elif isinstance(obj, (datetime, date, time)):
+            return obj.isoformat()
+        elif isinstance(obj, Enum):
+            return obj.value
+        elif isinstance(obj, MessageTrace):
+            return obj.to_dict()
+        elif hasattr(obj, 'to_dict'):
+            # Support objects with to_dict() method (like Frappe Document)
+            try:
+                return obj.to_dict()
+            except Exception:
+                return str(obj)
+        elif hasattr(obj, '__dict__'):
+            # Last resort: convert object attributes to dict
+            try:
+                return self._make_serializable(obj.__dict__)
+            except Exception:
+                return str(obj)
+        else:
+            return obj
     
-    def to_json(self, *args, **kwargs) -> str:
-        """Convert response to JSON string, refers to pydantic's model_dump_json and check docs for args/kwargs"""
-        return self.model_dump_json(*args, **kwargs)
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convert response to dictionary with proper JSON serialization.
+        
+        Handles:
+        - Enum values (converted to strings)
+        - DateTime objects (converted to ISO format)
+        - Frappe Document objects (converted to dicts)
+        - Any object with to_dict() method
+        """
+        result = {
+            'data': self._make_serializable(self.data),
+            'metadata': self._make_serializable(self.metadata),
+            'error_stack': [self._make_serializable(e) for e in self.error_stack],
+            'warning_stack': [self._make_serializable(w) for w in self.warning_stack],
+            'info_stack': [self._make_serializable(i) for i in self.info_stack],
+            'is_success': self.is_success
+        }
+        return result
+    
+    def to_json(self) -> str:
+        """Convert response to JSON string."""
+        return json.dumps(self.to_dict(), default=str)
     
     @classmethod
-    def success(cls, data: T = None, metadata: Optional[Dict[str, Any]] = None) -> 'Response[T]':
-        """Create a successful response"""
-        return cls(is_success=True, data=data, metadata=metadata)
-
+    def success(
+        cls,
+        data: Any = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> 'Response':
+        """Create a successful response."""
+        return cls(
+            data=data,
+            metadata=metadata,
+            is_success=True,
+            error_stack=[]
+        )
+    
     @classmethod
-    def failure(cls, error: str = None, error_code: str = None, details: Optional[Dict[str, Any]] = None, stack_trace: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> 'Response[T]':
-        """Create a failed response"""
-        response = cls(is_success=False, metadata=metadata)
+    def failure(
+        cls,
+        error: Optional[str] = None,
+        error_code: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+        stack_trace: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> 'Response':
+        """Create a failed response."""
+        response = cls(
+            data=None,
+            metadata=metadata,
+            is_success=False,
+            error_stack=[]
+        )
         if error:
-            return response.add_error(error, error_code, details, stack_trace)
+            response.add_error(error, error_code, details, stack_trace)
         return response
     
     @property
     def has_errors(self) -> bool:
-        """Check if response has errors"""
+        """Check if response has errors."""
         return len(self.error_stack) > 0
     
     @property
     def has_warnings(self) -> bool:
-        """Check if response has warnings"""
+        """Check if response has warnings."""
         return len(self.warning_stack) > 0
     
     @property
     def has_info(self) -> bool:
-        """Check if response has informational messages"""
+        """Check if response has informational messages."""
         return len(self.info_stack) > 0
 
-# Builder Pattern for more complex response construction
-class ResponseBuilder(Generic[T]):
-    """Builder pattern for creating complex responses"""
+
+# Lightweight builder pattern (optional, for complex response construction)
+class ResponseBuilder:
+    """Builder pattern for creating complex responses."""
     
     def __init__(self):
-        self._response = Response[T]()
+        """Initialize builder with a new Response."""
+        self._response = Response()
     
-    def with_data(self, data: T) -> 'ResponseBuilder[T]':
+    def with_data(self, data: Any) -> 'ResponseBuilder':
+        """Set response data."""
         self._response.set_data(data)
         return self
-
-    def with_metadata(self, metadata: Dict[str, Any]) -> 'ResponseBuilder[T]':
+    
+    def with_metadata(self, metadata: Dict[str, Any]) -> 'ResponseBuilder':
+        """Set response metadata."""
         self._response.metadata = metadata
         return self
-
-    def with_error(self, message: str, code: str = None, details: Optional[Dict[str, Any]] = None, stack_trace: Optional[str] = None) -> 'ResponseBuilder[T]':
+    
+    def with_error(
+        self,
+        message: str,
+        code: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+        stack_trace: Optional[str] = None
+    ) -> 'ResponseBuilder':
+        """Add an error message."""
         self._response.add_error(message, code, details, stack_trace)
         return self
-
-    def with_warning(self, message: str, code: str = None, details: Optional[Dict[str, Any]] = None) -> 'ResponseBuilder[T]':
+    
+    def with_warning(
+        self,
+        message: str,
+        code: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None
+    ) -> 'ResponseBuilder':
+        """Add a warning message."""
         self._response.add_warning(message, code, details)
         return self
-
-    def with_info(self, message: str, code: str = None, details: Optional[Dict[str, Any]] = None) -> 'ResponseBuilder[T]':
+    
+    def with_info(
+        self,
+        message: str,
+        code: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None
+    ) -> 'ResponseBuilder':
+        """Add an info message."""
         self._response.add_info(message, code, details)
         return self
-
-    def build(self) -> 'Response[T]':
+    
+    def build(self) -> Response:
+        """Build and return the response."""
         return self._response
-
-# Interface for response handlers
-class ResponseHandler(ABC, Generic[T]):
-    @abstractmethod
-    def handle(self, response: Response[T]) -> None:
-        pass
-
-# TODO: Implement logging response handler
-"""
-class LoggingResponseHandler(ResponseHandler[T]): 
-    def handle(self, response: Response[T]) -> None:
-        # Log the response details
-        pass
-"""
-            
-# TODO: Create class BaseResponseFactory, and class DefaultResponseFactory(BaseResponseFactory):
-"""
-class BaseResponseFactory:
-    #Base contract for converting domain Response -> transport-specific payloads.
-    def to_http(self, response: Response[Any]) -> HTTPResponse:
-        raise NotImplementedError
-
-    def to_ws(self, response: Response[Any]) -> WSResponse:
-        raise NotImplementedError
-
-    def to_grpc(self, response: Response[Any]) -> GRPCResponse:
-        raise NotImplementedError
-"""
-
-"""
-class DefaultResponseFactory(BaseResponseFactory):
-    #Converts Response -> JSON envelope (HTTP), WebSocket event, and placeholder gRPC.
-
-    def __init__(self, status_mapper: Callable[[Response[Any]], int] = default_status_from_response):
-        self._status_mapper = status_mapper
-
-    def _envelope(self, resp: Response[Any]) -> Dict[str, Any]:
-        pass
-"""
-
