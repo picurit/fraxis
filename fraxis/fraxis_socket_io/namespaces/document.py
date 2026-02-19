@@ -40,7 +40,7 @@ class DocumentNamespace(FraxisNamespace):
     _handler_map: ClassVar[dict[str, str]] = {}
 
     @FraxisNamespace.handler('document:create')
-    async def on_document_create(self, sid, data: dict) -> dict:
+    async def on_document_create(self, sid, data: dict = None) -> dict:
         """
         Create a new document.
         data: { doctype: str, data: dict }
@@ -49,6 +49,14 @@ class DocumentNamespace(FraxisNamespace):
         Returns: Response<Doc>  (ACK)
         """
         metadata = _get_metadata(sid)
+        
+        # Ensure data is a dict, not None
+        if data is None:
+            data = {}
+
+        # Ensure data is a dict, not None
+        if data is None:
+            data = {}
         
         try:
             doctype = data.get('doctype')
@@ -102,7 +110,7 @@ class DocumentNamespace(FraxisNamespace):
             return response.to_dict()
 
     @FraxisNamespace.handler('document:read')
-    async def on_document_read(self, sid, data: dict) -> dict:
+    async def on_document_read(self, sid, data: dict = None) -> dict:
         """
         Read a document by name.
         data: { doctype: str, name: str }
@@ -110,6 +118,14 @@ class DocumentNamespace(FraxisNamespace):
         Returns: Response<Doc>  (ACK)
         """
         metadata = _get_metadata(sid)
+        
+        # Ensure data is a dict, not None
+        if data is None:
+            data = {}
+
+        # Ensure data is a dict, not None
+        if data is None:
+            data = {}
         
         try:
             doctype = data.get('doctype')
@@ -154,7 +170,7 @@ class DocumentNamespace(FraxisNamespace):
             return response.to_dict()
 
     @FraxisNamespace.handler('document:update')
-    async def on_document_update(self, sid, data: dict) -> dict:
+    async def on_document_update(self, sid, data: dict = None) -> dict:
         """
         Update fields on an existing document.
         data: { doctype: str, name: str, data: dict }
@@ -164,6 +180,10 @@ class DocumentNamespace(FraxisNamespace):
         """
         metadata = _get_metadata(sid)
         
+        # Ensure data is a dict, not None
+        if data is None:
+            data = {}
+
         try:
             doctype = data.get('doctype')
             name = data.get('name')
@@ -217,7 +237,7 @@ class DocumentNamespace(FraxisNamespace):
             return response.to_dict()
 
     @FraxisNamespace.handler('document:delete')
-    async def on_document_delete(self, sid, data: dict) -> dict:
+    async def on_document_delete(self, sid, data: dict = None) -> dict:
         """
         Delete a document.
         data: { doctype: str, name: str }
@@ -227,6 +247,10 @@ class DocumentNamespace(FraxisNamespace):
         """
         metadata = _get_metadata(sid)
         
+        # Ensure data is a dict, not None
+        if data is None:
+            data = {}
+
         try:
             doctype = data.get('doctype')
             name = data.get('name')
@@ -277,7 +301,7 @@ class DocumentNamespace(FraxisNamespace):
             return response.to_dict()
 
     @FraxisNamespace.handler('document:subscribe')
-    async def on_document_subscribe(self, sid, data: dict) -> dict:
+    async def on_document_subscribe(self, sid, data: dict = None) -> dict:
         """
         Subscribe to change notifications for a specific document.
         data: { doctype: str, name: str }
@@ -286,6 +310,10 @@ class DocumentNamespace(FraxisNamespace):
         """
         metadata = _get_metadata(sid)
         
+        # Ensure data is a dict, not None
+        if data is None:
+            data = {}
+
         try:
             doctype = data.get('doctype')
             name = data.get('name')
@@ -320,7 +348,7 @@ class DocumentNamespace(FraxisNamespace):
             return response.to_dict()
 
     @FraxisNamespace.handler('document:unsubscribe')
-    async def on_document_unsubscribe(self, sid, data: dict) -> dict:
+    async def on_document_unsubscribe(self, sid, data: dict = None) -> dict:
         """
         Unsubscribe from change notifications for a specific document.
         data: { doctype: str, name: str }
@@ -328,6 +356,10 @@ class DocumentNamespace(FraxisNamespace):
         """
         metadata = _get_metadata(sid)
         
+        # Ensure data is a dict, not None
+        if data is None:
+            data = {}
+
         try:
             doctype = data.get('doctype')
             name = data.get('name')
