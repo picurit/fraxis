@@ -207,7 +207,7 @@ app_license = "mpl-2.0"
 # Job Events
 # ----------
 # before_job = ["fraxis.utils.before_job"]
-# after_job = ["fraxis.utils.after_job"]
+after_job = ["fraxis.utils.job_hooks.after_job"]
 
 # User Data Protection
 # --------------------

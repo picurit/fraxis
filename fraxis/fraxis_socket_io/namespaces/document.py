@@ -53,10 +53,6 @@ class DocumentNamespace(FraxisNamespace):
         # Ensure data is a dict, not None
         if data is None:
             data = {}
-
-        # Ensure data is a dict, not None
-        if data is None:
-            data = {}
         
         try:
             doctype = data.get('doctype')
@@ -119,10 +115,6 @@ class DocumentNamespace(FraxisNamespace):
         """
         metadata = _get_metadata(sid)
         
-        # Ensure data is a dict, not None
-        if data is None:
-            data = {}
-
         # Ensure data is a dict, not None
         if data is None:
             data = {}

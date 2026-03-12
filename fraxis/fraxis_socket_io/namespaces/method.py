@@ -6,6 +6,7 @@
 import frappe
 import traceback
 import asyncio
+import inspect
 from typing import ClassVar
 from datetime import datetime
 from fraxis.fraxis_socket_io.base import FraxisNamespace
@@ -34,9 +35,9 @@ class MethodNamespace(FraxisNamespace):
     Handle execution of whitelisted Frappe methods and controller methods.
     
     Provides:
-    - Synchronous execution via method:execute
+    - Synchronous/asynchronous execution via method:execute
     - Background job enqueueing via method:enqueue
-    - Progress streaming for enqueued jobs
+    - Progress streaming for enqueued jobs (via AsyncRedisManager)
     - Server script execution
     """
     
@@ -72,10 +73,11 @@ class MethodNamespace(FraxisNamespace):
     @FraxisNamespace.handler('method:execute')
     async def on_method_execute(self, sid, data: dict = None) -> dict:
         """
-        Execute a whitelisted method synchronously.
+        Execute a whitelisted method synchronously or asynchronously.
         data: { method: str, args?: dict }
-        Resolves method, validates is_whitelisted(), calls synchronously.
-        Emits: method:execute:start → method:execute:success/failure
+        Resolves method, validates is_whitelisted(), calls it.
+        For async methods that declare a 'progress' parameter, injects a progress callback.
+        Emits: method:execute:start → [method:execute:progress]* → method:execute:success/failure
         Returns: Response<Any>  (ACK)
         """
         metadata = _get_metadata(sid)
@@ -100,11 +102,75 @@ class MethodNamespace(FraxisNamespace):
             # Resolve and validate method
             method_func = self._get_whitelisted_method(method_name)
             
+            # Define progress callback that will be injected if method accepts it
+            # This callback captures 'sid' and 'method_name' via closure
+            async def _progress(percent, title=None, description=None, data=None):
+                """
+                Progress callback for async methods.
+                Emits progress events to the requesting client and method subscribers.
+                """
+                payload = {
+                    'percent': percent,
+                    'title': title,
+                    'description': description,
+                    'data': data  # arbitrary structured payload
+                }
+                
+                # Emit to requesting client (private room via sid)
+                await self._emit_state(sid, 'method', 'execute', 'progress', payload)
+                
+                # Broadcast to method subscribers
+                await self.emit('method:execute:progress', {
+                    'method': method_name,
+                    **payload
+                }, room=f"method:{method_name}")
+            
+            # Check if method signature includes 'progress' parameter
+            # If so, inject the callback
+            sig = inspect.signature(method_func)
+            call_args = args.copy()
+            
+            if 'progress' in sig.parameters:
+                call_args['progress'] = _progress
+            
             # Execute method
-            if asyncio.iscoroutinefunction(method_func):
-                result = await method_func(**args)
-            else:
-                result = method_func(**args)
+            # The @frappe.whitelist() decorator wraps functions with validate_argument_types(),
+            # which returns a synchronous wrapper even for async functions. The wrapper calls
+            # the original function directly, so if the original is async, it returns a coroutine.
+            result = method_func(**call_args)
+            
+            # If the result is a coroutine, await it
+            if asyncio.iscoroutine(result):
+                result = await result
+            
+            # If the result is an async generator/iterator, consume it
+            # This handles the AsyncIterator pattern where methods yield values incrementally
+            elif inspect.isasyncgen(result):
+                # Collect all yielded values from the async generator
+                # Each yielded value is emitted as a progress event
+                collected_values = []
+                value_count = 0
+                
+                async for value in result:
+                    value_count += 1
+                    collected_values.append(value)
+                    
+                    # Emit progress event for each yielded value
+                    # This allows clients to receive values as they're generated
+                    if _progress:
+                        await _progress(
+                            percent=None,  # Can't calculate percentage without knowing total count
+                            title="AsyncIterator Progress",
+                            description=f"Received value {value_count}",
+                            data={'value': value, 'index': value_count - 1}
+                        )
+                
+                # After consuming the entire iterator, return the collected values
+                result = {
+                    'values': collected_values,
+                    'total_count': value_count,
+                    'async_iterator': True
+                }
             
             # Build response
             response = Response.success(

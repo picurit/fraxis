@@ -1,0 +1,11 @@
+# Python Socket.IO Client for Fraxis
+# This requirements file includes all dependencies needed to run the simple async method execution example
+
+# Socket.IO Python client
+python-socketio[asyncio_client]>=5.11.0,<6.0.0
+
+# Async HTTP client (required by python-socketio for async operations)
+aiohttp>=3.9.0,<4.0.0
+
+# Environment variable management
+python-dotenv>=1.0.0,<2.0.0

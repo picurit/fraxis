@@ -6,12 +6,10 @@
 import click
 import frappe
 from frappe.commands import get_site, pass_context
-import asyncio
 import uvicorn
 import uvloop
-from socketio import AsyncServer, ASGIApp
+from socketio import AsyncServer, ASGIApp, AsyncRedisManager
 
-from fraxis.fraxis_socket_io.base import FraxisNamespace
 from fraxis.fraxis_socket_io.namespaces import SystemNamespace
 from fraxis.fraxis_socket_io.namespaces.document import DocumentNamespace
 from fraxis.fraxis_socket_io.namespaces.doctype import DoctypeNamespace
@@ -22,8 +20,13 @@ class SocketIOServer:
     """
     Manages the Fraxis Socket.IO server.
     
-    Runs as a separate process (started via `bench socketio-server`) on a configurable 
+    Runs as a separate process (started via `bench --site <sitename> socketio-server`) on a configurable 
     host/port (default `0.0.0.0:8005`), independent of Frappe's gunicorn workers.
+    
+    Uses AsyncRedisManager with a dedicated 'fraxis' channel for:
+    - Cross-process communication from RQ workers
+    - Direct emission to Socket.IO rooms from background jobs
+    - Horizontal scaling support (multiple Fraxis server instances)
     """
 
     def __init__(self, host: str = '0.0.0.0', port: int = 8005, logging: str = "info"):
@@ -31,12 +34,27 @@ class SocketIOServer:
         self.port = port
         self.logging = logging
         
-        # Initialize ASGI Socket.IO server
+        # Initialize AsyncRedisManager with dedicated 'fraxis' channel
+        # This enables:
+        # 1. RQ workers to emit progress directly to Socket.IO rooms
+        # 2. Multiple Fraxis server instances to share state
+        # 3. Clean separation from Frappe's internal Redis channels
+        redis_url = frappe.conf.redis_queue
+        redis_manager = AsyncRedisManager(
+            url=redis_url,
+            channel='fraxis',      # Dedicated channel for Fraxis events
+            write_only=False,      # This server both sends and receives
+            logger=False
+        )
+        
+        # Initialize ASGI Socket.IO server with Redis manager
         # - async_mode='asgi': ASGI compatible mode
+        # - client_manager: AsyncRedisManager for cross-process communication
         # - cors_allowed_origins='*': Allow all origins
         # - async_handlers=True: Handlers are coroutines
         self.sio = AsyncServer(
             async_mode='asgi',
+            client_manager=redis_manager,
             cors_allowed_origins='*',
             async_handlers=True,
             logger=False,
@@ -65,7 +83,14 @@ class SocketIOServer:
         self.sio.register_namespace(MethodNamespace('/api/method'))
     
     async def _serve_uvicorn(self):
-        """Coroutine to run the uvicorn server within the uvloop event loop."""
+        """
+        Coroutine to run the uvicorn server.
+        
+        The AsyncRedisManager handles all Redis pub/sub communication automatically:
+        - Subscribes to the 'fraxis' channel
+        - Relays emit() calls from RQ workers to connected clients
+        - Handles room routing natively via Socket.IO protocol
+        """
         config = uvicorn.Config(
             self.app,
             host=self.host,

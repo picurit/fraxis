@@ -1,0 +1,24 @@
+{
+  "name": "fraxis-socketio-client-tests",
+  "version": "1.0.0",
+  "description": "End-to-end test client for Fraxis Socket.IO server",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:debug": "vitest --inspect-brk"
+  },
+  "keywords": [
+    "socketio",
+    "fraxis",
+    "testing",
+    "integration"
+  ],
+  "author": "Fraxis Development Team",
+  "license": "MPL-2.0",
+  "devDependencies": {
+    "vitest": "^2.1.8",
+    "socket.io-client": "^4.7.0"
+  }
+}
