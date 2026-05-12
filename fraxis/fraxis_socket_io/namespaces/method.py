@@ -133,44 +133,114 @@ class MethodNamespace(FraxisNamespace):
             if 'progress' in sig.parameters:
                 call_args['progress'] = _progress
             
-            # Execute method
-            # The @frappe.whitelist() decorator wraps functions with validate_argument_types(),
-            # which returns a synchronous wrapper even for async functions. The wrapper calls
-            # the original function directly, so if the original is async, it returns a coroutine.
-            result = method_func(**call_args)
-            
-            # If the result is a coroutine, await it
-            if asyncio.iscoroutine(result):
-                result = await result
-            
-            # If the result is an async generator/iterator, consume it
-            # This handles the AsyncIterator pattern where methods yield values incrementally
-            elif inspect.isasyncgen(result):
-                # Collect all yielded values from the async generator
-                # Each yielded value is emitted as a progress event
-                collected_values = []
-                value_count = 0
-                
-                async for value in result:
-                    value_count += 1
-                    collected_values.append(value)
-                    
-                    # Emit progress event for each yielded value
-                    # This allows clients to receive values as they're generated
-                    if _progress:
-                        await _progress(
-                            percent=None,  # Can't calculate percentage without knowing total count
-                            title="AsyncIterator Progress",
-                            description=f"Received value {value_count}",
-                            data={'value': value, 'index': value_count - 1}
-                        )
-                
-                # After consuming the entire iterator, return the collected values
-                result = {
-                    'values': collected_values,
-                    'total_count': value_count,
-                    'async_iterator': True
-                }
+            # Execute method inside a dedicated thread so that each concurrent
+            # invocation gets its own frappe.local (and thus its own frappe.db
+            # connection). Running two async coroutines that share the single
+            # frappe.db opened at server startup causes MySQL packet-sequence
+            # errors when they interleave their DB calls on the same socket.
+            #
+            # Each worker thread calls frappe.init() + frappe.connect() to
+            # set up a fully isolated Frappe context (local.site, local.flags,
+            # local.db, etc.), then frappe.destroy() in the finally block.
+            # Async methods are run on a dedicated event loop inside the thread
+            # so they never contend with the main loop or other threads.
+            # The progress callback is bridged back to the main loop via
+            # asyncio.run_coroutine_threadsafe().
+
+            loop = asyncio.get_event_loop()
+
+            # Capture site name from the main thread's frappe context so the
+            # worker thread can initialise its own frappe.local correctly.
+            _site = frappe.local.site
+            _sites_path = getattr(frappe.local, 'sites_path', '.')
+
+            def _make_progress_threadsafe(progress_coro_fn):
+                """
+                Return an async wrapper that can be awaited from within the
+                thread's own event loop.  It schedules the actual Socket.IO
+                emit (progress_coro_fn) onto the *main* event loop via
+                run_coroutine_threadsafe, then waits for it to finish using
+                asyncio.wrap_future (which attaches to the current thread loop).
+                """
+                async def _threadsafe_progress(percent, title=None, description=None, data=None):
+                    future = asyncio.run_coroutine_threadsafe(
+                        progress_coro_fn(percent, title=title, description=description, data=data),
+                        loop
+                    )
+                    # Await the concurrent.futures.Future on the thread's own loop.
+                    await asyncio.wrap_future(future)
+
+                return _threadsafe_progress
+
+            async def _run_in_thread():
+                """
+                Execute method_func inside a worker thread with an isolated
+                frappe DB connection, then return the result to the caller.
+                """
+                # Replace the async progress callback with a thread-safe variant.
+                threadsafe_call_args = call_args.copy()
+                if 'progress' in threadsafe_call_args:
+                    threadsafe_call_args['progress'] = _make_progress_threadsafe(_progress)
+
+                def _thread_body():
+                    # Each thread has its own frappe.local (werkzeug threading.local).
+                    # We must call frappe.init() + frappe.connect() here to set up
+                    # local.site, local.flags, local.db etc. for this thread.
+                    frappe.init(site=_site, sites_path=_sites_path)
+                    frappe.connect()
+
+                    try:
+                        raw_result = method_func(**threadsafe_call_args)
+
+                        # method_func may return a coroutine (async def wrapped by
+                        # @frappe.whitelist).  Run it on a *new* event loop inside
+                        # this thread so it does not compete with the main loop.
+                        if asyncio.iscoroutine(raw_result):
+                            thread_loop = asyncio.new_event_loop()
+                            try:
+                                raw_result = thread_loop.run_until_complete(raw_result)
+                            finally:
+                                thread_loop.close()
+
+                        elif inspect.isasyncgen(raw_result):
+                            thread_loop = asyncio.new_event_loop()
+                            collected_values = []
+                            value_count = 0
+
+                            async def _consume_gen():
+                                nonlocal value_count
+                                async for value in raw_result:
+                                    value_count += 1
+                                    collected_values.append(value)
+                                    if threadsafe_call_args.get('progress'):
+                                        await threadsafe_call_args['progress'](
+                                            percent=None,
+                                            title="AsyncIterator Progress",
+                                            description=f"Received value {value_count}",
+                                            data={'value': value, 'index': value_count - 1}
+                                        )
+
+                            try:
+                                thread_loop.run_until_complete(_consume_gen())
+                            finally:
+                                thread_loop.close()
+
+                            raw_result = {
+                                'values': collected_values,
+                                'total_count': value_count,
+                                'async_iterator': True
+                            }
+
+                        frappe.db.commit()
+                        return raw_result
+
+                    finally:
+                        frappe.destroy()
+
+                # Run the thread body in the default executor (ThreadPoolExecutor).
+                return await loop.run_in_executor(None, _thread_body)
+
+            result = await _run_in_thread()
             
             # Build response
             response = Response.success(
@@ -184,7 +254,8 @@ class MethodNamespace(FraxisNamespace):
             # Broadcast to method subscription room
             await self.emit('method:execute:success', response.to_dict(), room=f"method:{method_name}")
             
-            frappe.db.commit()
+            # DB commit and close are handled inside _thread_body.
+            # No commit needed here on the main event-loop thread.
             return response.to_dict()
             
         except Exception as e:
