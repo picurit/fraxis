@@ -306,12 +306,12 @@ class TestResponseFieldValidation:
     
     def test_response_error_stack_with_multiple_errors(self):
         """Response can hold multiple errors with different codes."""
-        response = Response.failure()
-        
+        response = Response()  # empty: no default error
+
         response.add_error("Error 1", code="ERR_001")
         response.add_error("Error 2", code="ERR_002")
         response.add_error("Error 3", code="ERR_003")
-        
+
         assert len(response.error_stack) == 3
         assert response.error_stack[0].code == "ERR_001"
         assert response.error_stack[1].code == "ERR_002"

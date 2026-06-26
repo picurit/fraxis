@@ -171,7 +171,7 @@ def create_test_doc_factory():
         try:
             frappe.delete_doc(doctype, name)
             frappe.db.commit()
-        except:
+        except Exception:
             pass
 
 
@@ -277,7 +277,7 @@ def handler_registry_test_class():
 @pytest.fixture
 def namespace_factory():
     """Fixture providing namespace factory for testing."""
-    from fraxis.fraxis_socket_io.namespaces.system import SystemNamespace
+    from fraxis.fraxis_socket_io.namespaces import SystemNamespace
     from fraxis.fraxis_socket_io.namespaces.document import DocumentNamespace
     from fraxis.fraxis_socket_io.namespaces.doctype import DoctypeNamespace
     from fraxis.fraxis_socket_io.namespaces.method import MethodNamespace
