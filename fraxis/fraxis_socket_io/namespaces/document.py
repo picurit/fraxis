@@ -4,379 +4,202 @@
 # For license information, please see license.txt
 
 import frappe
-import traceback
 from typing import ClassVar
-from datetime import datetime
+
 from fraxis.fraxis_socket_io.base import FraxisNamespace
+from fraxis.fraxis_socket_io.context import build_metadata
+from fraxis.runtime.frappe_executor import run_frappe
+from fraxis.services import document as document_service
+from fraxis.services.validation import collection_room, document_room, require, sanitize_error
 from fraxis.utils.cornerstone.response import Response
-
-
-def _get_metadata(sid: str) -> dict:
-    """Helper to safely get frappe metadata."""
-    try:
-        timestamp = frappe.utils.now()
-        site = frappe.local.site if hasattr(frappe, 'local') else 'Unknown'
-    except:
-        timestamp = datetime.now().isoformat()
-        site = 'Unknown'
-    
-    return {
-        'timestamp': timestamp,
-        'sid': sid,
-        'site': site
-    }
 
 
 class DocumentNamespace(FraxisNamespace):
     """
-    Handle full CRUD on individual Frappe documents.
-    
-    Provides:
-    - Create, read, update, delete on any DocType the authenticated user has permission for
-    - Subscribe/unsubscribe to real-time change notifications for specific documents
-    - Broadcast change events to all subscribers when a document is saved or deleted
+    Full CRUD on individual Frappe documents.
+
+    Thin controller: it authenticates the sid, deserializes the request, delegates the
+    unit of work to a service through ``run_frappe`` (own connection / transaction /
+    identity), serializes the envelope, and broadcasts a coherent change signal.
+
+    Broadcast contract:
+    - per-document room ``document:{doctype}:{name}`` receives ``document:updated`` /
+      ``document:deleted`` (document:subscribe joins it, in this namespace);
+    - collection room ``doctype:{doctype}`` (joined by doctype:subscribe in /api/doctype)
+      receives ``document:created`` and a uniform ``document:changed`` for every action —
+      emitted with an explicit ``namespace`` so it crosses namespaces correctly (S3-2).
     """
-    
+
     _handler_map: ClassVar[dict[str, str]] = {}
+    DOCTYPE_NAMESPACE = "/api/doctype"
 
-    @FraxisNamespace.handler('document:create')
+    async def _broadcast_change(self, doctype, name, action, per_document=False):
+        """Emit the collection-level change signal (and per-document for update/delete).
+
+        Recipients are filtered by a fresh read-permission check at emit time
+        (``emit_to_permitted``), so a user whose access was revoked after subscribing
+        stops receiving change events on the next broadcast (analysis S3-3, §7.5).
+        """
+        await self.emit_to_permitted(
+            "document:changed",
+            {"doctype": doctype, "name": name, "action": action},
+            doctype=doctype,
+            room=collection_room(doctype),
+            namespace=self.DOCTYPE_NAMESPACE,
+        )
+        if per_document:
+            await self.emit_to_permitted(
+                f"document:{action}d" if action != "create" else "document:created",
+                {"doctype": doctype, "name": name},
+                doctype=doctype,
+                room=document_room(doctype, name),
+                namespace=self.namespace,
+            )
+
+    @FraxisNamespace.handler("document:create")
     async def on_document_create(self, sid, data: dict = None) -> dict:
-        """
-        Create a new document.
-        data: { doctype: str, data: dict }
-        Emits: document:create:start → document:create:success/failure
-        Broadcasts: document:created to doctype:<doctype> room
-        Returns: Response<Doc>  (ACK)
-        """
-        metadata = _get_metadata(sid)
-        
-        # Ensure data is a dict, not None
-        if data is None:
-            data = {}
-        
+        metadata = build_metadata(sid)
+        data = data or {}
         try:
-            doctype = data.get('doctype')
-            doc_data = data.get('data', {})
-            
-            if not doctype:
-                raise ValueError("doctype field is required")
-            
-            # Emit start state
-            await self._emit_state(sid, 'document', 'create', 'start')
-            
-            # Check permissions
-            if not frappe.has_permission(doctype, ptype='write'):
-                raise frappe.PermissionError(f"You do not have write permission on {doctype}")
-            
-            # Create and insert document
-            doc = frappe.new_doc(doctype)
-            doc.update(doc_data)
-            doc.insert()
-            frappe.db.commit()
-            
-            # Build response
-            response = Response.success(
-                data=doc.as_dict(),
-                metadata=metadata
-            )
-            
-            # Emit success state
-            await self._emit_state(sid, 'document', 'create', 'success', response.to_dict())
-            
-            # Broadcast to doctype room
-            await self.emit('document:created', {
-                'doctype': doctype,
-                'name': doc.name
-            }, room=f"doctype:{doctype}")
-            
-            return response.to_dict()
-            
-        except Exception as e:
-            response = Response.failure(
-                error=str(e),
-                error_code='DOCUMENT_CREATE_FAILED',
-                details={'doctype': data.get('doctype')},
-                stack_trace=traceback.format_exc(),
-                metadata=metadata
-            )
-            
-            # Emit failure state
-            await self._emit_state(sid, 'document', 'create', 'failure', response.to_dict())
-            
-            return response.to_dict()
+            user = await self.require_user(sid)
+            require(data, "doctype")
+            doctype = data.get("doctype")
+            await self._emit_state(sid, "document", "create", "start")
 
-    @FraxisNamespace.handler('document:read')
+            doc = await run_frappe(
+                document_service.create_document, doctype, data.get("data", {}), user=user
+            )
+            response = Response.success(data=doc, metadata=metadata)
+            await self._emit_state(sid, "document", "create", "success", response.to_dict())
+
+            await self.emit_to_permitted(
+                "document:created",
+                {"doctype": doctype, "name": doc.get("name")},
+                doctype=doctype,
+                room=collection_room(doctype),
+                namespace=self.DOCTYPE_NAMESPACE,
+            )
+            await self.emit_to_permitted(
+                "document:changed",
+                {"doctype": doctype, "name": doc.get("name"), "action": "create"},
+                doctype=doctype,
+                room=collection_room(doctype),
+                namespace=self.DOCTYPE_NAMESPACE,
+            )
+            return response.to_dict()
+        except Exception as e:
+            return await self._fail(sid, "create", "DOCUMENT_CREATE_FAILED", e, data, metadata)
+
+    @FraxisNamespace.handler("document:read")
     async def on_document_read(self, sid, data: dict = None) -> dict:
-        """
-        Read a document by name.
-        data: { doctype: str, name: str }
-        Emits: document:read:start → document:read:success/failure
-        Returns: Response<Doc>  (ACK)
-        """
-        metadata = _get_metadata(sid)
-        
-        # Ensure data is a dict, not None
-        if data is None:
-            data = {}
-        
+        metadata = build_metadata(sid)
+        data = data or {}
         try:
-            doctype = data.get('doctype')
-            name = data.get('name')
-            
-            if not doctype or not name:
-                raise ValueError("doctype and name fields are required")
-            
-            # Emit start state
-            await self._emit_state(sid, 'document', 'read', 'start')
-            
-            # Check permissions
-            if not frappe.has_permission(doctype, doc=name, ptype='read'):
-                raise frappe.PermissionError(f"You do not have read permission on {doctype} {name}")
-            
-            # Fetch document
-            doc = frappe.get_doc(doctype, name)
-            
-            # Build response
-            response = Response.success(
-                data=doc.as_dict(),
-                metadata=metadata
+            user = await self.require_user(sid)
+            require(data, "doctype", "name")
+            await self._emit_state(sid, "document", "read", "start")
+            doc = await run_frappe(
+                document_service.read_document, data["doctype"], data["name"], user=user
             )
-            
-            # Emit success state
-            await self._emit_state(sid, 'document', 'read', 'success', response.to_dict())
-            
+            response = Response.success(data=doc, metadata=metadata)
+            await self._emit_state(sid, "document", "read", "success", response.to_dict())
             return response.to_dict()
-            
         except Exception as e:
-            response = Response.failure(
-                error=str(e),
-                error_code='DOCUMENT_READ_FAILED',
-                details={'doctype': data.get('doctype'), 'name': data.get('name')},
-                stack_trace=traceback.format_exc(),
-                metadata=metadata
-            )
-            
-            # Emit failure state
-            await self._emit_state(sid, 'document', 'read', 'failure', response.to_dict())
-            
-            return response.to_dict()
+            return await self._fail(sid, "read", "DOCUMENT_READ_FAILED", e, data, metadata)
 
-    @FraxisNamespace.handler('document:update')
+    @FraxisNamespace.handler("document:update")
     async def on_document_update(self, sid, data: dict = None) -> dict:
-        """
-        Update fields on an existing document.
-        data: { doctype: str, name: str, data: dict }
-        Emits: document:update:start → document:update:success/failure
-        Broadcasts: document:updated to document:<doctype>/<name> room
-        Returns: Response<Doc>  (ACK)
-        """
-        metadata = _get_metadata(sid)
-        
-        # Ensure data is a dict, not None
-        if data is None:
-            data = {}
-
+        metadata = build_metadata(sid)
+        data = data or {}
         try:
-            doctype = data.get('doctype')
-            name = data.get('name')
-            doc_data = data.get('data', {})
-            
-            if not doctype or not name:
-                raise ValueError("doctype and name fields are required")
-            
-            # Emit start state
-            await self._emit_state(sid, 'document', 'update', 'start')
-            
-            # Check permissions
-            if not frappe.has_permission(doctype, doc=name, ptype='write'):
-                raise frappe.PermissionError(f"You do not have write permission on {doctype} {name}")
-            
-            # Fetch, update, and save document
-            doc = frappe.get_doc(doctype, name)
-            doc.update(doc_data)
-            doc.save()
-            frappe.db.commit()
-            
-            # Build response
-            response = Response.success(
-                data=doc.as_dict(),
-                metadata=metadata
-            )
-            
-            # Emit success state
-            await self._emit_state(sid, 'document', 'update', 'success', response.to_dict())
-            
-            # Broadcast to document room
-            await self.emit('document:updated', {
-                'doctype': doctype,
-                'name': name
-            }, room=f"document:{doctype}:{name}")
-            
-            return response.to_dict()
-            
-        except Exception as e:
-            response = Response.failure(
-                error=str(e),
-                error_code='DOCUMENT_UPDATE_FAILED',
-                details={'doctype': data.get('doctype'), 'name': data.get('name')},
-                stack_trace=traceback.format_exc(),
-                metadata=metadata
-            )
-            
-            # Emit failure state
-            await self._emit_state(sid, 'document', 'update', 'failure', response.to_dict())
-            
-            return response.to_dict()
+            user = await self.require_user(sid)
+            require(data, "doctype", "name")
+            doctype, name = data["doctype"], data["name"]
+            await self._emit_state(sid, "document", "update", "start")
 
-    @FraxisNamespace.handler('document:delete')
+            doc = await run_frappe(
+                document_service.update_document, doctype, name, data.get("data", {}), user=user
+            )
+            response = Response.success(data=doc, metadata=metadata)
+            await self._emit_state(sid, "document", "update", "success", response.to_dict())
+            await self._broadcast_change(doctype, name, "update", per_document=True)
+            return response.to_dict()
+        except Exception as e:
+            return await self._fail(sid, "update", "DOCUMENT_UPDATE_FAILED", e, data, metadata)
+
+    @FraxisNamespace.handler("document:delete")
     async def on_document_delete(self, sid, data: dict = None) -> dict:
-        """
-        Delete a document.
-        data: { doctype: str, name: str }
-        Emits: document:delete:start → document:delete:success/failure
-        Broadcasts: document:deleted to document:<doctype>/<name> room
-        Returns: Response<{ name: str }>  (ACK)
-        """
-        metadata = _get_metadata(sid)
-        
-        # Ensure data is a dict, not None
-        if data is None:
-            data = {}
-
+        metadata = build_metadata(sid)
+        data = data or {}
         try:
-            doctype = data.get('doctype')
-            name = data.get('name')
-            
-            if not doctype or not name:
-                raise ValueError("doctype and name fields are required")
-            
-            # Emit start state
-            await self._emit_state(sid, 'document', 'delete', 'start')
-            
-            # Check permissions
-            if not frappe.has_permission(doctype, doc=name, ptype='delete'):
-                raise frappe.PermissionError(f"You do not have delete permission on {doctype} {name}")
-            
-            # Delete document
-            frappe.delete_doc(doctype, name)
-            frappe.db.commit()
-            
-            # Build response
-            response = Response.success(
-                data={'name': name},
-                metadata=metadata
-            )
-            
-            # Emit success state
-            await self._emit_state(sid, 'document', 'delete', 'success', response.to_dict())
-            
-            # Broadcast to document room
-            await self.emit('document:deleted', {
-                'doctype': doctype,
-                'name': name
-            }, room=f"document:{doctype}:{name}")
-            
-            return response.to_dict()
-            
-        except Exception as e:
-            response = Response.failure(
-                error=str(e),
-                error_code='DOCUMENT_DELETE_FAILED',
-                details={'doctype': data.get('doctype'), 'name': data.get('name')},
-                stack_trace=traceback.format_exc(),
-                metadata=metadata
-            )
-            
-            # Emit failure state
-            await self._emit_state(sid, 'document', 'delete', 'failure', response.to_dict())
-            
-            return response.to_dict()
+            user = await self.require_user(sid)
+            require(data, "doctype", "name")
+            doctype, name = data["doctype"], data["name"]
+            await self._emit_state(sid, "document", "delete", "start")
 
-    @FraxisNamespace.handler('document:subscribe')
+            result = await run_frappe(
+                document_service.delete_document, doctype, name, user=user
+            )
+            response = Response.success(data=result, metadata=metadata)
+            await self._emit_state(sid, "document", "delete", "success", response.to_dict())
+            await self._broadcast_change(doctype, name, "delete", per_document=True)
+            return response.to_dict()
+        except Exception as e:
+            return await self._fail(sid, "delete", "DOCUMENT_DELETE_FAILED", e, data, metadata)
+
+    @FraxisNamespace.handler("document:subscribe")
     async def on_document_subscribe(self, sid, data: dict = None) -> dict:
-        """
-        Subscribe to change notifications for a specific document.
-        data: { doctype: str, name: str }
-        Validates read permission, then enters room.
-        Returns: Response<{ subscribed: True, room: str }>  (ACK)
-        """
-        metadata = _get_metadata(sid)
-        
-        # Ensure data is a dict, not None
-        if data is None:
-            data = {}
-
+        metadata = build_metadata(sid)
+        data = data or {}
         try:
-            doctype = data.get('doctype')
-            name = data.get('name')
-            
-            if not doctype or not name:
-                raise ValueError("doctype and name fields are required")
-            
-            # Check permissions
-            if not frappe.has_permission(doctype, doc=name, ptype='read'):
-                raise frappe.PermissionError(f"You do not have read permission on {doctype} {name}")
-            
-            room = f"document:{doctype}:{name}"
-            
-            # Enter subscription room
+            user = await self.require_user(sid)
+            require(data, "doctype", "name")
+            doctype, name = data["doctype"], data["name"]
+            await run_frappe(
+                document_service.assert_read_permission, doctype, name, user=user
+            )
+            room = document_room(doctype, name)
             await self.enter_room(sid, room)
-            
-            response = Response.success(
-                data={'subscribed': True, 'room': room},
-                metadata=metadata
-            )
-            
-            return response.to_dict()
-            
+            return Response.success(
+                data={"subscribed": True, "room": room}, metadata=metadata
+            ).to_dict()
         except Exception as e:
-            response = Response.failure(
-                error=str(e),
-                error_code='DOCUMENT_SUBSCRIBE_FAILED',
-                details={'doctype': data.get('doctype'), 'name': data.get('name')},
-                metadata=metadata
-            )
-            
-            return response.to_dict()
+            return await self._fail(sid, "subscribe", "DOCUMENT_SUBSCRIBE_FAILED", e, data, metadata, emit=False)
 
-    @FraxisNamespace.handler('document:unsubscribe')
+    @FraxisNamespace.handler("document:unsubscribe")
     async def on_document_unsubscribe(self, sid, data: dict = None) -> dict:
-        """
-        Unsubscribe from change notifications for a specific document.
-        data: { doctype: str, name: str }
-        Returns: Response<{ unsubscribed: True, room: str }>  (ACK)
-        """
-        metadata = _get_metadata(sid)
-        
-        # Ensure data is a dict, not None
-        if data is None:
-            data = {}
-
+        metadata = build_metadata(sid)
+        data = data or {}
         try:
-            doctype = data.get('doctype')
-            name = data.get('name')
-            
-            if not doctype or not name:
-                raise ValueError("doctype and name fields are required")
-            
-            room = f"document:{doctype}:{name}"
-            
-            # Leave subscription room
+            await self.require_user(sid)
+            require(data, "doctype", "name")
+            room = document_room(data["doctype"], data["name"])
             await self.leave_room(sid, room)
-            
-            response = Response.success(
-                data={'unsubscribed': True, 'room': room},
-                metadata=metadata
-            )
-            
-            return response.to_dict()
-            
+            return Response.success(
+                data={"unsubscribed": True, "room": room}, metadata=metadata
+            ).to_dict()
         except Exception as e:
-            response = Response.failure(
-                error=str(e),
-                error_code='DOCUMENT_UNSUBSCRIBE_FAILED',
-                details={'doctype': data.get('doctype'), 'name': data.get('name')},
-                metadata=metadata
-            )
-            
-            return response.to_dict()
+            return await self._fail(sid, "unsubscribe", "DOCUMENT_UNSUBSCRIBE_FAILED", e, data, metadata, emit=False)
+
+    async def _fail(self, sid, action, code, exc, data, metadata, emit=True):
+        """Log server-side, return a sanitized failure envelope (no traceback to client).
+
+        Logging uses ``frappe.logger`` (file-based, non-blocking) rather than
+        ``frappe.log_error`` deliberately: this runs on the event-loop thread, and
+        ``frappe.log_error`` would issue a synchronous DB insert+commit on the shared
+        boot connection — blocking the loop and reintroducing the cross-handler
+        transaction interleaving the refactor removes (analysis S1-1, S2-1, §6). The
+        full traceback is captured server-side via ``exc_info`` (analysis S2-2 / P7).
+        """
+        frappe.logger("fraxis.document").error(
+            f"document:{action} failed for {data.get('doctype')}: {exc}", exc_info=True
+        )
+        response = Response.failure(
+            error=sanitize_error(exc),
+            error_code=code,
+            details={"doctype": data.get("doctype"), "name": data.get("name")},
+            metadata=metadata,
+        )
+        if emit:
+            await self._emit_state(sid, "document", action, "failure", response.to_dict())
+        return response.to_dict()
