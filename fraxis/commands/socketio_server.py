@@ -14,6 +14,8 @@ from fraxis.fraxis_socket_io.namespaces import SystemNamespace
 from fraxis.fraxis_socket_io.namespaces.document import DocumentNamespace
 from fraxis.fraxis_socket_io.namespaces.doctype import DoctypeNamespace
 from fraxis.fraxis_socket_io.namespaces.method import MethodNamespace
+from fraxis.runtime import frappe_executor
+from fraxis.runtime.emitter import FRAXIS_CHANNEL, fraxis_redis_url
 
 
 class SocketIOServer:
@@ -39,11 +41,11 @@ class SocketIOServer:
         # 1. RQ workers to emit progress directly to Socket.IO rooms
         # 2. Multiple Fraxis server instances to share state
         # 3. Clean separation from Frappe's internal Redis channels
-        redis_url = frappe.conf.redis_queue
+        redis_url = fraxis_redis_url()
         redis_manager = AsyncRedisManager(
             url=redis_url,
-            channel='fraxis',      # Dedicated channel for Fraxis events
-            write_only=False,      # This server both sends and receives
+            channel=FRAXIS_CHANNEL,   # Dedicated channel for Fraxis events
+            write_only=False,         # This server both sends and receives
             logger=False
         )
         
@@ -155,9 +157,17 @@ class SocketIOManager:
             site = get_site(context)
             frappe.init(site=site)
             frappe.connect()
-            
-            frappe.logger("socketio_server").info(f"Starting server for site {site}")
-            
+
+            # Capture BOTH site and sites_path before any worker thread re-inits its own
+            # Frappe context — re-init must resolve the same sites directory (analysis S4-8).
+            sites_path = frappe.local.sites_path
+            max_workers = frappe.conf.get("fraxis_max_workers") or frappe_executor.DEFAULT_MAX_WORKERS
+            frappe_executor.configure(site=site, sites_path=sites_path, max_workers=max_workers)
+
+            frappe.logger("socketio_server").info(
+                f"Starting server for site {site} (executor workers={max_workers})"
+            )
+
             try:
                 logging_level = "info"
                 server = SocketIOServer(host=host, port=port, logging=logging_level)
@@ -165,6 +175,9 @@ class SocketIOManager:
             except Exception as e:
                 frappe.log_error(f"Socket.IO server error: {str(e)}")
             finally:
+                # Drain the executor (graceful shutdown, no orphaned threads) then tear
+                # down the boot Frappe context (analysis P10).
+                frappe_executor.shutdown(wait=True)
                 frappe.destroy()
         
         return [start_socketio_server]
