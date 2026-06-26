@@ -206,8 +206,10 @@ app_license = "mpl-2.0"
 
 # Job Events
 # ----------
-# before_job = ["fraxis.utils.before_job"]
-after_job = ["fraxis.utils.job_hooks.after_job"]
+# Fraxis does NOT register a bench-global after_job hook. Job completion is reported via
+# per-job RQ on_success/on_failure callbacks attached at enqueue time
+# (fraxis.utils.job_hooks.on_job_success / on_job_failure), scoped to the dedicated
+# `fraxis` queue only — no fan-out across every job in the bench (analysis §5.3b, S3-4).
 
 # User Data Protection
 # --------------------

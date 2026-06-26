@@ -4,139 +4,97 @@
 # For license information, please see license.txt
 
 """
-Frappe RQ job hooks for emitting success/failure events to Fraxis Socket.IO clients.
+Per-job RQ completion callbacks for fraxis enqueued methods.
 
-These hooks are called by Frappe's execute_job() after every background job completes.
-They use AsyncRedisManager in write-only mode to emit method:enqueue:success/failure
-events directly to Socket.IO rooms.
+These are passed as ``on_success`` / ``on_failure`` to ``frappe.enqueue`` for the
+specific fraxis job — NOT registered as a bench-global ``after_job`` hook. RQ invokes
+them in the worker process with the real outcome, giving honest success/failure
+discrimination (fixes the always-success bug, analysis S2-4/S1-6) and emitting each
+terminal event exactly once to the canonical per-task room (fixes duplicate delivery,
+analysis S2-5).
+
+``frappe.utils.background_jobs.execute_job`` tears down the Frappe context in its
+``finally`` block before these callbacks run, so each callback re-initialises a minimal
+context (just enough to read ``frappe.conf`` for the Redis URL) from ``job.kwargs['site']``.
 """
 
+from typing import Optional
+
 import frappe
-from socketio import AsyncRedisManager
-import asyncio
+
+from fraxis.runtime.emitter import emit
+from fraxis.services.validation import task_room
 
 
-# Lazy-initialized write-only Redis manager
-_redis_manager = None
+def _method_name(job) -> Optional[str]:
+    """Dotted method name the job ran, taken from execute_job's queue args."""
+    kwargs = getattr(job, "kwargs", None) or {}
+    method = kwargs.get("method")
+    if callable(method):
+        return f"{method.__module__}.{method.__qualname__}"
+    return method
 
 
-def _get_redis_manager():
-    """
-    Get or create a write-only AsyncRedisManager for job completion events.
-    
-    Shared with fraxis.utils.realtime.publish_progress but separate instance
-    to avoid coupling.
-    """
-    global _redis_manager
-    
-    if _redis_manager is None:
-        redis_url = frappe.conf.redis_queue
-        _redis_manager = AsyncRedisManager(
-            url=redis_url,
-            channel='fraxis',      # Same channel as Fraxis Socket.IO server
-            write_only=True,       # RQ workers only publish, never receive
-            logger=False
-        )
-        # Must set server to None for write-only mode
-        _redis_manager.server = None
-    
-    return _redis_manager
-
-
-def after_job(method, **kwargs):
-    """
-    Frappe hook called after every RQ job completes (success or failure).
-    
-    Emits method:enqueue:success or method:enqueue:failure events to Socket.IO clients
-    via AsyncRedisManager using Redis publish directly (no asyncio event loop needed).
-    
-    Args:
-        method: Method name that was executed
-        **kwargs: Additional job execution data, including:
-            - result: Job return value (on success)
-            - job_name: Job ID/task_id
-    """
-    import pickle
-    from redis import Redis
-    
-    # Only emit for methods (not all background jobs)
-    if not method:
+def _emit_terminal(job, state: str, payload: dict) -> None:
+    method_name = _method_name(job)
+    task_id = getattr(job, "id", None)
+    if not method_name or not task_id:
         return
-    
-    # Get task_id from job_name
-    task_id = kwargs.get('job_name')
-    if not task_id:
-        # Try to get from RQ context
-        try:
-            from rq import get_current_job
-            job = get_current_job()
-            if job:
-                task_id = job.id
-        except Exception:
-            pass
-    
-    if not task_id:
-        return
-    
-    # Determine success or failure based on presence of result
-    result = kwargs.get('result')
-    is_success = result is not None or 'result' in kwargs
-    
-    # Build event payload
-    if is_success:
-        event_name = 'method:enqueue:success'
-        payload = {
-            'task_id': task_id,
-            'result': result
-        }
-    else:
-        event_name = 'method:enqueue:failure'
-        payload = {
-            'task_id': task_id,
-            'error': 'Job failed'
-        }
-    
-    # Build Socket.IO pub/sub message format
-    # This matches what AsyncRedisManager.emit() publishes
-    job_room = f"method:{method}:{task_id}"
-    method_room = f"method:{method}"
-    
-    # Create messages in AsyncPubSubManager format
-    import uuid
-    host_id = uuid.uuid4().hex
-    
-    job_message = {
-        'method': 'emit',
-        'event': event_name,
-        'data': payload,
-        'namespace': '/api/method',
-        'room': job_room,
-        'skip_sid': None,
-        'callback': None,
-        'host_id': host_id
-    }
-    
-    method_message = {
-        'method': 'emit',
-        'event': event_name,
-        'data': {'method': method, **payload},
-        'namespace': '/api/method',
-        'room': method_room,
-        'skip_sid': None,
-        'callback': None,
-        'host_id': host_id
-    }
-    
-    # Publish directly to Redis using synchronous Redis client
+
+    inited = False
     try:
-        redis_url = frappe.conf.redis_queue
-        redis_client = Redis.from_url(redis_url)
-        
-        # Publish both messages to 'fraxis' channel
-        # AsyncRedisManager uses pickle for serialization
-        redis_client.publish('fraxis', pickle.dumps(job_message))
-        redis_client.publish('fraxis', pickle.dumps(method_message))
-        
-        redis_client.close()
-    except Exception as e:
-        frappe.logger("job_hooks").error(f"Failed to publish job completion event: {str(e)}")
+        if not getattr(frappe.local, "site", None):
+            site = (getattr(job, "kwargs", None) or {}).get("site")
+            if site:
+                frappe.init(site=site)
+                inited = True
+        emit(
+            f"method:enqueue:{state}",
+            {"task_id": task_id, **payload},
+            namespace="/api/method",
+            room=task_room(method_name, task_id),
+        )
+    finally:
+        if inited:
+            frappe.destroy()
+
+
+def on_job_success(job, connection, result) -> None:
+    """RQ on_success(job, connection, result) — emit the terminal success event."""
+    try:
+        _emit_terminal(job, "success", {"result": result})
+    except Exception:
+        _log_callback_error()
+
+
+def on_job_failure(job, connection, exc_type=None, exc_value=None, traceback=None) -> None:
+    """RQ on_failure(job, connection, type, value, tb) — emit the terminal failure event.
+
+    Also chains Frappe's default failed-registry truncation, which our custom callback
+    would otherwise replace, keeping the RQ failed-job registry bounded.
+    """
+    try:
+        error = str(exc_value) if exc_value else (
+            exc_type.__name__ if exc_type else "Job failed"
+        )
+        _emit_terminal(
+            job,
+            "failure",
+            {"error": error, "error_code": "METHOD_ENQUEUE_FAILED"},
+        )
+    except Exception:
+        _log_callback_error()
+    finally:
+        try:
+            from frappe.utils.background_jobs import truncate_failed_registry
+
+            truncate_failed_registry(job, connection, exc_type, exc_value, traceback)
+        except Exception:
+            _log_callback_error()
+
+
+def _log_callback_error() -> None:
+    try:
+        frappe.logger("fraxis.job_hooks").error(frappe.get_traceback())
+    except Exception:
+        pass
