@@ -15,36 +15,33 @@ from typing import ClassVar
 from socketio.exceptions import ConnectionRefusedError as SocketIOConnectionRefusedError
 
 from fraxis.fraxis_socket_io.base import FraxisNamespace
+from fraxis.security.auth import AuthError, parse_token
 
 
 @pytest.mark.unit
-class TestFraxisNamespaceValidateAuth:
-    """Test FraxisNamespace.validate_auth() authentication hook."""
-    
-    def test_validate_auth_default_returns_true(self):
-        """Default validate_auth() returns True (always allow)."""
-        namespace = FraxisNamespace()
-        
-        result = namespace.validate_auth({'token': 'any_token'})
-        assert result is True
-        
-        result = namespace.validate_auth({})
-        assert result is True
-        
-        result = namespace.validate_auth(None)
-        assert result is True
-    
-    def test_validate_auth_can_be_overridden(self):
-        """Subclasses can override validate_auth()."""
-        class CustomNamespace(FraxisNamespace):
-            def validate_auth(self, client_auth):
-                return client_auth.get('token') == 'valid_token'
-        
-        namespace = CustomNamespace()
-        
-        assert namespace.validate_auth({'token': 'valid_token'}) is True
-        assert namespace.validate_auth({'token': 'invalid_token'}) is False
-        assert namespace.validate_auth({}) is False
+class TestTokenParsing:
+    """Test the pure token parser that backs api_key:secret authentication."""
+
+    def test_parse_valid_token(self):
+        """A well-formed 'api_key:api_secret' token splits into its two parts."""
+        assert parse_token("abc123:secret456") == ("abc123", "secret456")
+
+    def test_parse_token_strips_whitespace(self):
+        assert parse_token("  abc :  secret ") == ("abc", "secret")
+
+    def test_parse_token_keeps_colons_in_secret(self):
+        """Only the first colon separates key from secret."""
+        assert parse_token("key:a:b:c") == ("key", "a:b:c")
+
+    def test_parse_token_rejects_missing(self):
+        for bad in (None, "", {}):
+            with pytest.raises(AuthError):
+                parse_token(bad)
+
+    def test_parse_token_rejects_malformed(self):
+        for bad in ("no-colon", "key:", ":secret", " : "):
+            with pytest.raises(AuthError):
+                parse_token(bad)
 
 
 @pytest.mark.unit
