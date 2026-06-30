@@ -13,6 +13,7 @@ from fraxis.fraxis_socket_io.base import FraxisNamespace
 from fraxis.fraxis_socket_io.context import build_metadata
 from fraxis.registry import get_fraxis_method
 from fraxis.runtime.frappe_executor import run_frappe, set_current_user
+from fraxis.runtime.queue_router import resolve_queue
 from fraxis.services.validation import method_room, require, sanitize_error, task_room
 from fraxis.utils.cornerstone.response import Response
 
@@ -231,10 +232,15 @@ def _enqueue_fraxis_job(method_name: str, queue: str, args: dict) -> str:
 
     Runs inside the executor (authenticated user is set), so the job inherits that user
     and executes with the same permissions. Returns the RQ job id (the task_id).
+
+    The requested queue is resolved through :func:`resolve_queue`: if the dedicated
+    ``fraxis`` worker is not available (queue not configured, or no live worker), the job
+    falls back to the shared ``default`` queue so it still gets processed instead of
+    stranding in Redis.
     """
     job = frappe.enqueue(
         method_name,
-        queue=queue,
+        queue=resolve_queue(queue),
         on_success="fraxis.utils.job_hooks.on_job_success",
         on_failure="fraxis.utils.job_hooks.on_job_failure",
         **(args or {}),
