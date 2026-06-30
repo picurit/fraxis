@@ -5,20 +5,18 @@
 
 """Unit tests for the fraxis method registry (framework-free)."""
 
-import pytest
+import unittest
 
 from fraxis import registry
 
 
-@pytest.fixture(autouse=True)
-def _clean_registry():
-    registry.clear_registry()
-    yield
-    registry.clear_registry()
+class TestFraxisMethodRegistry(unittest.TestCase):
+    def setUp(self):
+        registry.clear_registry()
 
+    def tearDown(self):
+        registry.clear_registry()
 
-@pytest.mark.unit
-class TestFraxisMethodRegistry:
     def test_registers_with_dotted_path_key(self):
         @registry.fraxis_method(execution="async", realtime=True)
         def sample():
@@ -26,18 +24,18 @@ class TestFraxisMethodRegistry:
 
         key = f"{sample.__module__}.{sample.__qualname__}"
         meta = registry.get_fraxis_method(key)
-        assert meta is not None
-        assert meta["execution"] == "async"
-        assert meta["realtime"] is True
-        assert meta["queue"] == "fraxis"
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta["execution"], "async")
+        self.assertTrue(meta["realtime"])
+        self.assertEqual(meta["queue"], "fraxis")
 
     def test_marks_function_attribute(self):
         @registry.fraxis_method(execution="sync", realtime=False, queue="fraxis")
         def sample():
             return 1
 
-        assert sample.__fraxis_method__["execution"] == "sync"
-        assert sample.__fraxis_method__["realtime"] is False
+        self.assertEqual(sample.__fraxis_method__["execution"], "sync")
+        self.assertFalse(sample.__fraxis_method__["realtime"])
 
     def test_is_realtime_only_for_registered_realtime(self):
         @registry.fraxis_method(realtime=True)
@@ -48,15 +46,15 @@ class TestFraxisMethodRegistry:
         def plain():
             return 1
 
-        assert registry.is_realtime(f"{rt.__module__}.{rt.__qualname__}") is True
-        assert registry.is_realtime(f"{plain.__module__}.{plain.__qualname__}") is False
+        self.assertTrue(registry.is_realtime(f"{rt.__module__}.{rt.__qualname__}"))
+        self.assertFalse(registry.is_realtime(f"{plain.__module__}.{plain.__qualname__}"))
         # Unregistered methods are never realtime.
-        assert registry.is_realtime("some.unregistered.method") is False
+        self.assertFalse(registry.is_realtime("some.unregistered.method"))
 
     def test_invalid_execution_mode_rejected(self):
-        with pytest.raises(ValueError):
+        with self.assertRaises(ValueError):
             registry.fraxis_method(execution="bogus")
 
     def test_get_unregistered_returns_none(self):
-        assert registry.get_fraxis_method("not.registered") is None
-        assert registry.is_registered("not.registered") is False
+        self.assertIsNone(registry.get_fraxis_method("not.registered"))
+        self.assertFalse(registry.is_registered("not.registered"))

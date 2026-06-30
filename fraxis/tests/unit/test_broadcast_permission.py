@@ -14,9 +14,8 @@ filtering logic is exercised deterministically with no live server or DB.
 """
 
 import asyncio
+import unittest
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from fraxis.fraxis_socket_io.base import FraxisNamespace
 
@@ -46,8 +45,7 @@ def _make_namespace(participants, sessions):
     return ns, emitted
 
 
-@pytest.mark.unit
-class TestEmitToPermitted:
+class TestEmitToPermitted(unittest.TestCase):
     def test_revoked_user_is_filtered_out(self):
         """userA keeps read access (2 sids), userB is revoked (1 sid) → only A delivered."""
         ns, emitted = _make_namespace(
@@ -74,9 +72,9 @@ class TestEmitToPermitted:
             )
 
         targets = sorted(e["to"] for e in emitted)
-        assert targets == ["sidA1", "sidA2"]
-        assert {e["event"] for e in emitted} == {"document:changed"}
-        assert {e["namespace"] for e in emitted} == {"/api/doctype"}
+        self.assertEqual(targets, ["sidA1", "sidA2"])
+        self.assertEqual({e["event"] for e in emitted}, {"document:changed"})
+        self.assertEqual({e["namespace"] for e in emitted}, {"/api/doctype"})
 
     def test_permission_checked_once_per_distinct_user(self):
         """Two sids of the same user → exactly one permission check, both delivered."""
@@ -97,8 +95,8 @@ class TestEmitToPermitted:
                 )
             )
 
-        assert checked_users == ["a@x"]  # one check, not per-sid
-        assert sorted(e["to"] for e in emitted) == ["s1", "s2"]
+        self.assertEqual(checked_users, ["a@x"])  # one check, not per-sid
+        self.assertEqual(sorted(e["to"] for e in emitted), ["s1", "s2"])
 
     def test_no_participants_short_circuits(self):
         """Empty room → no permission checks, no emits (no overhead on hot paths)."""
@@ -112,7 +110,7 @@ class TestEmitToPermitted:
                 ns.emit_to_permitted("e", {}, doctype="ToDo", room="r", namespace="/api/doctype")
             )
 
-        assert emitted == []
+        self.assertEqual(emitted, [])
 
     def test_guest_and_sessionless_sids_are_skipped(self):
         """Sids with no bound user or the Guest user are never delivered to."""
@@ -129,7 +127,7 @@ class TestEmitToPermitted:
                 ns.emit_to_permitted("e", {}, doctype="ToDo", room="r", namespace="/api/doctype")
             )
 
-        assert [e["to"] for e in emitted] == ["real"]
+        self.assertEqual([e["to"] for e in emitted], ["real"])
 
     def test_permission_check_exception_does_not_deliver(self):
         """If the permission check errors out, that user is not delivered to (fail-closed)."""
@@ -146,4 +144,4 @@ class TestEmitToPermitted:
                 ns.emit_to_permitted("e", {}, doctype="ToDo", room="r", namespace="/api/doctype")
             )
 
-        assert emitted == []  # gather(return_exceptions=True) → verdict is not True → skipped
+        self.assertEqual(emitted, [])  # gather(return_exceptions=True) → verdict is not True → skipped
