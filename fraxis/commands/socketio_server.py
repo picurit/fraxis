@@ -3,6 +3,8 @@
 # If a copy of the MPL was not distributed with this file, You can obtain one at http://mozilla.org/MPL/2.0/.
 # For license information, please see license.txt
 
+import asyncio
+
 import click
 import frappe
 from frappe.commands import get_site, pass_context
@@ -15,7 +17,9 @@ from fraxis.fraxis_socket_io.namespaces.document import DocumentNamespace
 from fraxis.fraxis_socket_io.namespaces.doctype import DoctypeNamespace
 from fraxis.fraxis_socket_io.namespaces.method import MethodNamespace
 from fraxis.runtime import frappe_executor
+from fraxis.runtime.doc_event_relay import run_doc_event_relay
 from fraxis.runtime.emitter import FRAXIS_CHANNEL, fraxis_redis_url
+from fraxis.runtime.queue_router import validate_startup_queue
 
 
 class SocketIOServer:
@@ -79,9 +83,11 @@ class SocketIOServer:
         - /api/doctype: Collection-level operations on a DocType
         - /api/method: Execute whitelisted Frappe methods
         """
+        self.ns_document = DocumentNamespace('/api/document')
+        self.ns_doctype = DoctypeNamespace('/api/doctype')
         self.sio.register_namespace(SystemNamespace('/system'))
-        self.sio.register_namespace(DocumentNamespace('/api/document'))
-        self.sio.register_namespace(DoctypeNamespace('/api/doctype'))
+        self.sio.register_namespace(self.ns_document)
+        self.sio.register_namespace(self.ns_doctype)
         self.sio.register_namespace(MethodNamespace('/api/method'))
     
     async def _serve_uvicorn(self):
@@ -101,7 +107,22 @@ class SocketIOServer:
             loop="asyncio"
         )
         server = uvicorn.Server(config)
-        await server.serve()
+
+        # Start the document-event relay as a background task on this loop: it bridges
+        # ORM mutations made outside the socket handlers (e.g. dendriva's State Signal
+        # inserts) to subscribed clients. Cancelled cleanly on shutdown — no orphan task
+        # (fraxis_improvements_plan.md §A.4).
+        relay_task = asyncio.create_task(
+            run_doc_event_relay(self.ns_doctype, self.ns_document)
+        )
+        try:
+            await server.serve()
+        finally:
+            relay_task.cancel()
+            try:
+                await relay_task
+            except (asyncio.CancelledError, Exception):
+                pass
     
     def run(self):
         """
@@ -163,6 +184,11 @@ class SocketIOManager:
             sites_path = frappe.local.sites_path
             max_workers = frappe.conf.get("fraxis_max_workers") or frappe_executor.DEFAULT_MAX_WORKERS
             frappe_executor.configure(site=site, sites_path=sites_path, max_workers=max_workers)
+
+            # Validate the dedicated `fraxis` queue once, at startup: if no live worker is
+            # consuming it, method:enqueue transparently falls back to the `default` queue
+            # (the decision is logged and cached for this process). See queue_router.
+            validate_startup_queue("fraxis")
 
             frappe.logger("socketio_server").info(
                 f"Starting server for site {site} (executor workers={max_workers})"
