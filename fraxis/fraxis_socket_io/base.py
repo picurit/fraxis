@@ -11,8 +11,10 @@ import frappe
 from socketio import AsyncNamespace
 from socketio.exceptions import ConnectionRefusedError
 
+from fraxis.runtime import sub_registry
 from fraxis.runtime.frappe_executor import run_frappe
 from fraxis.security.auth import resolve_token_to_user
+from fraxis.services.event_filter import matches
 
 
 def _utc_now_iso() -> str:
@@ -112,8 +114,90 @@ class FraxisNamespace(AsyncNamespace):
         )
 
     async def on_disconnect(self, sid: str, reason: str = None) -> None:
-        """Standard disconnection handler."""
-        pass
+        """Release every subscription refcount this sid held (critical cleanup).
+
+        Without this, a refcount leaks on each disconnect, the activation gate stays
+        stuck "active", and the bridge over-emits forever (fraxis_improvements_plan.md
+        §A.2). The per-sid filter map is discarded with the session automatically.
+        """
+        try:
+            session = await self.get_session(sid)
+        except Exception:
+            session = None
+        subs = (session or {}).get("subs") or {}
+        for room, hk in list(subs.items()):
+            try:
+                sub_registry.sub_del(hk[0], hk[1])
+            except Exception:
+                try:
+                    frappe.logger("fraxis.sub_registry").error(frappe.get_traceback())
+                except Exception:
+                    pass
+
+    # --- Subscription registry + per-sid filter bookkeeping -----------------------
+
+    async def _track_subscription(
+        self,
+        sid: str,
+        *,
+        h: str,
+        key: str,
+        room: str,
+        filter_clauses,
+    ) -> None:
+        """Record a subscription: store its filter on the session and bump the refcount.
+
+        Re-subscribing the same room is idempotent on the refcount — the previous count
+        for that room is released first so a client cannot inflate the gate by repeating
+        ``subscribe`` on the same room.
+        """
+        session = await self.get_session(sid) or {}
+        subs = dict(session.get("subs") or {})
+        filters = dict(session.get("filters") or {})
+
+        prev = subs.get(room)
+        if prev:
+            try:
+                sub_registry.sub_del(prev[0], prev[1])
+            except Exception:
+                pass
+
+        subs[room] = [h, key]
+        if filter_clauses:
+            filters[room] = filter_clauses
+        else:
+            filters.pop(room, None)
+
+        session["subs"] = subs
+        session["filters"] = filters
+        await self.save_session(sid, session)
+
+        try:
+            sub_registry.sub_add(h, key)
+        except Exception:
+            try:
+                frappe.logger("fraxis.sub_registry").error(frappe.get_traceback())
+            except Exception:
+                pass
+
+    async def _untrack_subscription(self, sid: str, room: str) -> None:
+        """Drop a room's filter from the session and decrement its refcount."""
+        session = await self.get_session(sid) or {}
+        subs = dict(session.get("subs") or {})
+        filters = dict(session.get("filters") or {})
+        prev = subs.pop(room, None)
+        filters.pop(room, None)
+        session["subs"] = subs
+        session["filters"] = filters
+        await self.save_session(sid, session)
+        if prev:
+            try:
+                sub_registry.sub_del(prev[0], prev[1])
+            except Exception:
+                try:
+                    frappe.logger("fraxis.sub_registry").error(frappe.get_traceback())
+                except Exception:
+                    pass
 
     async def _emit_state(
         self,
@@ -136,6 +220,7 @@ class FraxisNamespace(AsyncNamespace):
         doctype: str,
         room: str,
         namespace: str,
+        filter_data: dict = None,
     ) -> None:
         """Broadcast ``event`` to ``room``, re-checking read permission per recipient.
 
@@ -149,6 +234,14 @@ class FraxisNamespace(AsyncNamespace):
         delete broadcast, whose document no longer exists. One permission check is run
         per distinct user (off the loop, in the executor), not per sid.
 
+        ``filter_data`` (the bridged document's projected fields) enables per-subscriber
+        narrowing: a sid that subscribed with a ``filter`` only receives documents whose
+        data matches its stored clauses. The filter is per-client, so it is evaluated per
+        sid — *after* the per-user permission verdict — and can only narrow delivery
+        within an already-permitted room, never widen it (fraxis_improvements_plan.md
+        §A.4). When ``filter_data`` is ``None`` (in-process socket-handler broadcasts) no
+        filtering occurs — original behavior, fully backward-compatible.
+
         Enumerates this server instance's local room participants; in a multi-server
         deployment each instance filters the subscribers it owns.
         """
@@ -160,6 +253,7 @@ class FraxisNamespace(AsyncNamespace):
             return
 
         user_sids: dict[str, list] = {}
+        sid_clauses: dict[str, list] = {}
         for sid, _eio in participants:
             try:
                 session = await self.server.get_session(sid, namespace=namespace)
@@ -168,6 +262,8 @@ class FraxisNamespace(AsyncNamespace):
             user = (session or {}).get("user")
             if user and user != "Guest":
                 user_sids.setdefault(user, []).append(sid)
+                if filter_data is not None:
+                    sid_clauses[sid] = ((session or {}).get("filters") or {}).get(room)
         if not user_sids:
             return
 
@@ -179,4 +275,6 @@ class FraxisNamespace(AsyncNamespace):
         for user, ok in zip(users, verdicts):
             if ok is True:
                 for sid in user_sids[user]:
+                    if filter_data is not None and not matches(sid_clauses.get(sid), filter_data):
+                        continue
                     await self.emit(event, payload, to=sid, namespace=namespace)

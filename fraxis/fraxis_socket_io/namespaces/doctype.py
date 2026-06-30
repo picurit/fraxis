@@ -8,8 +8,10 @@ from typing import ClassVar
 
 from fraxis.fraxis_socket_io.base import FraxisNamespace
 from fraxis.fraxis_socket_io.context import build_metadata
+from fraxis.runtime import sub_registry
 from fraxis.runtime.frappe_executor import run_frappe
 from fraxis.services import doctype as doctype_service
+from fraxis.services.event_filter import normalize_filter
 from fraxis.services.validation import clamp_limit, collection_room, require, sanitize_error
 from fraxis.utils.cornerstone.response import Response
 
@@ -94,6 +96,11 @@ class DoctypeNamespace(FraxisNamespace):
         broadcast time (``emit_to_permitted`` in ``DocumentNamespace``), so a user whose
         read access is revoked after subscribing stops receiving change events on the
         next broadcast without needing to reconnect (analysis S3-3, §7.5).
+
+        An optional ``filter`` narrows delivery to documents whose data matches the
+        clauses (e.g. ``payload.client_correlation_id == <uuid>`` for the widget). The
+        subscription also bumps the registry refcount so the doc-event bridge activates
+        for this doctype (fraxis_improvements_plan.md §A.2/§A.5).
         """
         metadata = build_metadata(sid)
         data = data or {}
@@ -101,9 +108,13 @@ class DoctypeNamespace(FraxisNamespace):
             user = await self.require_user(sid)
             require(data, "doctype")
             doctype = data["doctype"]
+            clauses = normalize_filter(data.get("filter"))
             await run_frappe(doctype_service.assert_read_permission, doctype, user=user)
             room = collection_room(doctype)
             await self.enter_room(sid, room)
+            await self._track_subscription(
+                sid, h=sub_registry.H_DT, key=doctype, room=room, filter_clauses=clauses
+            )
             return Response.success(
                 data={"subscribed": True, "room": room}, metadata=metadata
             ).to_dict()
@@ -119,6 +130,7 @@ class DoctypeNamespace(FraxisNamespace):
             require(data, "doctype")
             room = collection_room(data["doctype"])
             await self.leave_room(sid, room)
+            await self._untrack_subscription(sid, room)
             return Response.success(
                 data={"unsubscribed": True, "room": room}, metadata=metadata
             ).to_dict()

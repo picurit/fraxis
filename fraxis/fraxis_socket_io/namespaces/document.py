@@ -8,8 +8,10 @@ from typing import ClassVar
 
 from fraxis.fraxis_socket_io.base import FraxisNamespace
 from fraxis.fraxis_socket_io.context import build_metadata
+from fraxis.runtime import sub_registry
 from fraxis.runtime.frappe_executor import run_frappe
 from fraxis.services import document as document_service
+from fraxis.services.event_filter import normalize_filter
 from fraxis.services.validation import collection_room, document_room, require, sanitize_error
 from fraxis.utils.cornerstone.response import Response
 
@@ -155,11 +157,19 @@ class DocumentNamespace(FraxisNamespace):
             user = await self.require_user(sid)
             require(data, "doctype", "name")
             doctype, name = data["doctype"], data["name"]
+            clauses = normalize_filter(data.get("filter"))
             await run_frappe(
                 document_service.assert_read_permission, doctype, name, user=user
             )
             room = document_room(doctype, name)
             await self.enter_room(sid, room)
+            await self._track_subscription(
+                sid,
+                h=sub_registry.H_DOC,
+                key=sub_registry.doc_key(doctype, name),
+                room=room,
+                filter_clauses=clauses,
+            )
             return Response.success(
                 data={"subscribed": True, "room": room}, metadata=metadata
             ).to_dict()
@@ -175,6 +185,7 @@ class DocumentNamespace(FraxisNamespace):
             require(data, "doctype", "name")
             room = document_room(data["doctype"], data["name"])
             await self.leave_room(sid, room)
+            await self._untrack_subscription(sid, room)
             return Response.success(
                 data={"unsubscribed": True, "room": room}, metadata=metadata
             ).to_dict()
