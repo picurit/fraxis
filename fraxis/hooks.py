@@ -142,13 +142,17 @@ app_license = "mpl-2.0"
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+# Generic document-event bridge: every ORM insert/update/delete is offered to the bridge,
+# whose first action is the subscription gate — unsubscribed doctypes do zero work
+# (fraxis_improvements_plan.md §A.3). Uses the "*" wildcard so no per-doctype registration
+# is needed; the bridge stays decoupled from any consumer app.
+doc_events = {
+	"*": {
+		"after_insert": "fraxis.runtime.doc_event_bridge.on_after_insert",
+		"on_update": "fraxis.runtime.doc_event_bridge.on_update",
+		"on_trash": "fraxis.runtime.doc_event_bridge.on_trash",
+	}
+}
 
 # Scheduled Tasks
 # ---------------
