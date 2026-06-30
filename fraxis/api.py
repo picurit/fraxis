@@ -25,6 +25,7 @@ from datetime import datetime
 from typing import AsyncIterator, List
 
 import frappe
+import frappe.client  # bind the lazily-loaded submodule so frappe.client.* resolves in the bare executor thread (analysis Part B)
 
 from fraxis.registry import fraxis_method
 from fraxis.runtime.frappe_executor import run_frappe

@@ -18,6 +18,7 @@ layer also enforces read permission for the authenticated user.
 from typing import Optional
 
 import frappe
+import frappe.client  # bind the lazily-loaded submodule so frappe.client.get_list resolves in the bare executor thread (no HTTP dispatch to import it for us)
 
 from fraxis.services.validation import validate_fields, validate_order_by
 
