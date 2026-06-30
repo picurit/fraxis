@@ -3,4 +3,4 @@
 # If a copy of the MPL was not distributed with this file, You can obtain one at http://mozilla.org/MPL/2.0/.
 # For license information, please see license.txt
 
-__version__ = "0.0.1"
+__version__ = "0.0.1-beta"
