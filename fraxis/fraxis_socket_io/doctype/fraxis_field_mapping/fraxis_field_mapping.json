@@ -1,0 +1,124 @@
+{
+ "actions": [],
+ "creation": "2026-10-01 09:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "ref_doctype",
+  "fieldname",
+  "public_name",
+  "example",
+  "show_description",
+  "returned_in",
+  "lookup_section",
+  "lookup_doctype",
+  "lookup_column",
+  "lookup_field",
+  "lookup_value",
+  "lookup_restrict"
+ ],
+ "fields": [
+  {
+   "columns": 3,
+   "fieldname": "ref_doctype",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "DocType",
+   "options": "DocType",
+   "reqd": 1
+  },
+  {
+   "columns": 2,
+   "fieldname": "fieldname",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Field",
+   "reqd": 1,
+   "description": "A field the DocType returns."
+  },
+  {
+   "columns": 2,
+   "fieldname": "public_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Public Name",
+   "description": "What clients see and send instead of the fieldname, e.g. assistant_name. Letters, digits and _. Empty: the fieldname."
+  },
+  {
+   "columns": 2,
+   "fieldname": "example",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Example",
+   "description": "Value shown in the API docs as an example of what the field holds or a filter expects. Empty: the field's Placeholder (DocType or Customize Form), else one based on the field type."
+  },
+  {
+   "columns": 1,
+   "default": "1",
+   "fieldname": "show_description",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Show Description",
+   "description": "Show the field's description in the API docs. Fields without a row always show it."
+  },
+  {
+   "default": "Lists and Records",
+   "fieldname": "returned_in",
+   "fieldtype": "Select",
+   "label": "Returned In",
+   "options": "Lists and Records\nRecords Only\nNever",
+   "description": "Where reads return the field; request bodies accept it in every case. Records Only: left out of lists (e.g. a long set of numbers), returned when one record is read. Never: write-only, never returned, filtered nor sorted."
+  },
+  {
+   "fieldname": "lookup_section",
+   "fieldtype": "Section Break",
+   "label": "Lookup",
+   "description": "Show the field as the matching record of another DocType, e.g. Jambonz Call Stats > agent as the AI Assistant whose agent_id holds it, or AI Assistant > phone_number as the title of its Go4 Phone Number. Clients read, filter and write the other record's value and never see this field's own. Records outside the client's Extra Params are never matched."
+  },
+  {
+   "fieldname": "lookup_doctype",
+   "fieldtype": "Link",
+   "label": "Lookup DocType",
+   "options": "DocType"
+  },
+  {
+   "fieldname": "lookup_column",
+   "fieldtype": "Column Break"
+  },
+  {
+   "depends_on": "lookup_doctype",
+   "fieldname": "lookup_field",
+   "fieldtype": "Data",
+   "label": "Lookup Match Field",
+   "description": "Field of the Lookup DocType holding this field's value, e.g. agent_id."
+  },
+  {
+   "default": "name",
+   "depends_on": "lookup_doctype",
+   "fieldname": "lookup_value",
+   "fieldtype": "Data",
+   "label": "Lookup Value Field",
+   "description": "Field of the Lookup DocType clients see instead, e.g. name (the record's ID)."
+  },
+  {
+   "default": "1",
+   "depends_on": "lookup_doctype",
+   "fieldname": "lookup_restrict",
+   "fieldtype": "Check",
+   "label": "Restrict Rows",
+   "description": "When the client has Extra Params on the Lookup DocType, only return rows whose value belongs to one of its records (e.g. calls of its own assistants). Untick when the field only decorates the row (e.g. a phone number title): rows without a matching record would disappear."
+  }
+ ],
+ "istable": 1,
+ "links": [],
+ "modified": "2026-10-02 23:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Fraxis Socket IO",
+ "name": "Fraxis Field Mapping",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
